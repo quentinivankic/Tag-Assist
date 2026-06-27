@@ -83,6 +83,7 @@ def create_app(config: Config) -> FastAPI:
                 "meta": meta,
                 "people_hint": people_hint,
                 "face_suggestions": face_suggestions,
+                "known_nodes": entities.names(),
                 "position": idx + 1,
                 "total": len(all_ids),
                 "prev_id": prev_id,
@@ -115,7 +116,8 @@ def create_app(config: Config) -> FastAPI:
         "what is this?" answer, pre-suggesting the box's category as the top).
         """
         known_names = entities.names()
-        items: list[dict] = []
+        known_found: list[str] = []          # display names of recognized entities
+        unknown_found: list[tuple[str, str]] = []  # (name, suggested category)
         seen: set[str] = set()
         for box, answer in (("people", people), ("location", location), ("context", context)):
             category = _BOX_CATEGORY[box]
@@ -126,24 +128,41 @@ def create_app(config: Config) -> FastAPI:
                     continue
                 seen.add(key)
                 if ent:
-                    items.append({
-                        "name": ent.display,
-                        "status": "known",
-                        "chain": ent.chain,
-                    })
+                    known_found.append(ent.display)
                 else:
-                    items.append({
-                        "name": name,
-                        "status": "unknown",
-                        "suggested": category,
-                    })
+                    unknown_found.append((name, category))
+
+        # Collapse overlaps: keep only the deepest mentioned entity in a chain.
+        items: list[dict] = []
+        for name in entities.collapse_descendants(known_found):
+            items.append({
+                "name": name,
+                "status": "known",
+                "chain": entities.resolve_chain(name),
+            })
+        for name, category in unknown_found:
+            items.append({"name": name, "status": "unknown", "suggested": category})
         return JSONResponse({"items": items, "llm": llm.available()})
 
     @app.post("/learn")
     def learn(name: str = Form(...), chain: str = Form("")):
-        """Teach the app what an entity is (chain like 'Pets > Dog'). Remembered."""
+        """Teach the app what an entity is (path like 'Pets > Dog'). Remembered.
+
+        Returns the taught entity AND every node in its full path (each with its
+        own resolved chain), so the UI can auto-resolve any still-pending
+        "what is this?" cards that just became known (e.g. teaching a deep place
+        path makes the leftover 'Phoenix' card disappear).
+        """
         ent = entities.learn(name, chain)
-        return JSONResponse({"name": ent.display, "chain": ent.chain})
+        resolved = [
+            {"name": node, "chain": entities.resolve_chain(node)}
+            for node in entities.full_path(ent.display)
+        ]
+        return JSONResponse({
+            "name": ent.display,
+            "chain": entities.resolve_chain(ent.display),
+            "resolved": resolved,
+        })
 
     @app.post("/commit")
     def commit(entry_id: int = Form(...), entities_json: str = Form("[]")):
@@ -152,14 +171,16 @@ def create_app(config: Config) -> FastAPI:
             payload = json.loads(entities_json)
         except ValueError:
             raise HTTPException(400, "Bad entities payload")
+        # Defensively collapse ancestors the client may have sent.
+        by_name = {(it.get("name") or "").strip(): it for it in payload if (it.get("name") or "").strip()}
+        keep = {n.lower() for n in entities.collapse_descendants(list(by_name))}
         added: list[str] = []
         with open_lib() as lib:
             entry = lib.get_entry(entry_id)
             if entry is None:
                 raise HTTPException(404, "Entry not found")
-            for item in payload:
-                name = (item.get("name") or "").strip()
-                if not name:
+            for name, item in by_name.items():
+                if name.lower() not in keep:
                     continue
                 chain = [c for c in item.get("chain", []) if c and c.strip()]
                 if lib.apply_entity(entry_id, name, chain):

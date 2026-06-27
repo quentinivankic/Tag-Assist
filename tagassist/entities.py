@@ -2,17 +2,26 @@
 
 This is the "learns your world" store. The first time you mention a name the app
 doesn't know, it asks what that name *is* (a path like ``Pets > Dog``). From then
-on the name is auto-recognized and its full parent chain is applied to photos.
+on the name is auto-recognized and its full ancestry is applied to photos.
+
+**Composable hierarchy.** Each entity stores a single ``parent`` (the display
+name of another entity), not a flattened chain. Full ancestry is computed by
+walking parent links. This is what lets you teach a place's parent *once* and
+have everything below it inherit the rest::
+
+    teach Phoenix   -> "Location > USA > Arizona"     (Phoenix.parent = Arizona)
+    teach Moms House -> "Phoenix"                      (Moms House.parent = Phoenix)
+    full_path("Moms House") == [Location, USA, Arizona, Phoenix, Moms House]
 
 Stored as JSON at ``<library>/.tagassist_cache/entities.json``::
 
     {
-      "stella": {"display": "Stella", "chain": ["Pets", "Dog"], "aliases": []},
-      "mom":    {"display": "Mom",    "chain": ["People", "Family"], "aliases": ["mamma"]}
+      "phoenix":    {"display": "Phoenix",    "parent": "Arizona", "aliases": []},
+      "moms house": {"display": "Moms House", "parent": "Phoenix", "aliases": []}
     }
 
-The key is always the lowercased name; ``chain`` is the parent path from broadest
-to the direct parent (the entity itself is the leaf appended at tag-write time).
+Legacy records written with a ``chain`` list (an earlier format) are migrated to
+parent links automatically on load.
 """
 
 from __future__ import annotations
@@ -25,31 +34,23 @@ from pathlib import Path
 CACHE_DIRNAME = ".tagassist_cache"
 STORE_FILENAME = "entities.json"
 
-# Accept "Pets > Dog", "Pets/Dog", "Pets, Dog" or "Pets > Dog" when the user
-# describes what something is.
+# Accept "Pets > Dog", "Pets/Dog", "Pets, Dog" or "Pets » Dog" as a parent path.
 _CHAIN_SPLIT = re.compile(r"\s*(?:>|/|»|->|,)\s*")
 
 
 @dataclass
 class Entity:
     display: str
-    chain: list[str] = field(default_factory=list)
+    parent: str | None = None  # display name of the parent entity (None = root)
     aliases: list[str] = field(default_factory=list)
-
-    def as_path(self) -> list[str]:
-        """Full top-to-leaf path including the entity itself."""
-        return [*self.chain, self.display]
 
 
 def parse_chain(text: str) -> list[str]:
-    """Parse a user-typed parent path like 'Pets > Dog' into ['Pets', 'Dog'].
-
-    Empty/whitespace yields an empty chain (entity has no parent).
-    """
+    """Parse a user-typed parent path 'Pets > Dog' into ['Pets', 'Dog'] (broad
+    to narrow). Empty/whitespace yields an empty list (entity is a root)."""
     if not text:
         return []
-    parts = [p.strip() for p in _CHAIN_SPLIT.split(text) if p.strip()]
-    return parts
+    return [p.strip() for p in _CHAIN_SPLIT.split(text) if p.strip()]
 
 
 class EntityStore:
@@ -72,13 +73,20 @@ class EntityStore:
             raw = json.loads(self.path.read_text(encoding="utf-8"))
         except Exception:
             return
+        legacy: list[tuple[Entity, list[str]]] = []
         for key, val in raw.items():
             ent = Entity(
                 display=val.get("display", key),
-                chain=list(val.get("chain", [])),
+                parent=val.get("parent"),
                 aliases=list(val.get("aliases", [])),
             )
             self._data[key] = ent
+            if "parent" not in val and "chain" in val:  # legacy flat-chain record
+                legacy.append((ent, list(val.get("chain", []))))
+        if legacy:
+            for ent, chain in legacy:
+                ent.parent = self._link_path(chain)
+            self._save()  # rewrite in the new parent-pointer format
         self._rebuild_alias_index()
 
     def _rebuild_alias_index(self) -> None:
@@ -89,10 +97,12 @@ class EntityStore:
 
     def _save(self) -> None:
         out = {
-            key: {"display": e.display, "chain": e.chain, "aliases": e.aliases}
+            key: {"display": e.display, "parent": e.parent, "aliases": e.aliases}
             for key, e in sorted(self._data.items())
         }
-        self.path.write_text(json.dumps(out, indent=2, ensure_ascii=False), encoding="utf-8")
+        self.path.write_text(
+            json.dumps(out, indent=2, ensure_ascii=False), encoding="utf-8"
+        )
 
     # -- lookups ---------------------------------------------------------
 
@@ -105,13 +115,63 @@ class EntityStore:
             return self._data[self._alias_index[key]]
         return None
 
+    def resolve_chain(self, name: str) -> list[str]:
+        """Ancestry of ``name`` from broadest root down to its direct parent
+        (excludes the entity itself). Cycle-guarded."""
+        ent = self.lookup(name)
+        chain: list[str] = []
+        seen: set[str] = set()
+        cur = ent.parent if ent else None
+        while cur:
+            kl = cur.lower()
+            if kl in seen:
+                break
+            seen.add(kl)
+            parent_ent = self._data.get(kl)
+            chain.append(parent_ent.display if parent_ent else cur)
+            cur = parent_ent.parent if parent_ent else None
+        chain.reverse()
+        return chain
+
+    def full_path(self, name: str) -> list[str]:
+        """Full top-to-leaf path including the entity itself."""
+        ent = self.lookup(name)
+        display = ent.display if ent else name.strip()
+        return [*self.resolve_chain(name), display]
+
+    def is_ancestor(self, a: str, b: str) -> bool:
+        """True if ``a`` appears in ``b``'s ancestry."""
+        a_ent = self.lookup(a)
+        a_disp = (a_ent.display if a_ent else a.strip()).lower()
+        return a_disp in [c.lower() for c in self.resolve_chain(b)]
+
+    def collapse_descendants(self, names: list[str]) -> list[str]:
+        """Drop any name that is an ancestor of another in the list.
+
+        Mentioning 'Phoenix' and 'Moms House' collapses to ['Moms House'] —
+        TagStudio already makes the ancestors searchable via the child.
+        """
+        canon: list[str] = []
+        seen: set[str] = set()
+        for n in names:
+            ent = self.lookup(n)
+            disp = ent.display if ent else n.strip()
+            if not disp or disp.lower() in seen:
+                continue
+            seen.add(disp.lower())
+            canon.append(disp)
+        return [
+            d for d in canon
+            if not any(o != d and self.is_ancestor(d, o) for o in canon)
+        ]
+
     def names(self) -> list[str]:
-        """All known display names + aliases, for greedy multi-word matching."""
+        """All known display names + aliases (longest first), for greedy
+        multi-word matching and type-ahead."""
         out: list[str] = []
         for ent in self._data.values():
             out.append(ent.display)
             out.extend(ent.aliases)
-        # Longest first so multi-word entities win over their prefixes.
         return sorted(set(out), key=lambda s: (-len(s), s.lower()))
 
     def all(self) -> list[Entity]:
@@ -125,25 +185,48 @@ class EntityStore:
 
     # -- writes ----------------------------------------------------------
 
-    def learn(
-        self, name: str, chain: list[str] | str, aliases: tuple[str, ...] = ()
-    ) -> Entity:
-        """Record (or update) what ``name`` is and how it nests.
+    def _link_path(self, segments: list[str]) -> str | None:
+        """Ensure each segment exists as an entity linked to the previous one,
+        reusing existing nodes WITHOUT clobbering their parent. Returns the
+        display name of the last (narrowest) segment, or None if empty."""
+        prev: str | None = None
+        for seg in segments:
+            seg = seg.strip()
+            if not seg:
+                continue
+            k = seg.lower()
+            ent = self._data.get(k)
+            if ent is None:
+                ent = Entity(display=seg, parent=prev)
+                self._data[k] = ent
+            elif ent.parent is None and prev is not None:
+                ent.parent = prev  # fill a gap; never overwrite an existing parent
+            prev = ent.display
+        return prev
 
-        ``chain`` may be a list (['Pets','Dog']) or a user-typed string
-        ('Pets > Dog'). Returns the stored Entity.
+    def learn(
+        self, name: str, path: list[str] | str, aliases: tuple[str, ...] = ()
+    ) -> Entity:
+        """Record what ``name`` is and how it nests.
+
+        ``path`` is the parent path (broad->narrow), as a list or a typed string
+        ('Location > USA > Arizona'). Intermediate nodes are created/reused so
+        the ancestry composes. Returns the stored Entity.
         """
         name = name.strip()
         if not name:
             raise ValueError("Entity name must not be empty")
-        if isinstance(chain, str):
-            chain = parse_chain(chain)
+        segments = parse_chain(path) if isinstance(path, str) else list(path)
+        parent = self._link_path(segments)
         key = name.lower()
         existing = self._data.get(key)
         merged_aliases = sorted(
-            {*(existing.aliases if existing else []), *(a.strip() for a in aliases if a.strip())}
+            {
+                *(existing.aliases if existing else []),
+                *(a.strip() for a in aliases if a.strip()),
+            }
         )
-        ent = Entity(display=name, chain=list(chain), aliases=merged_aliases)
+        ent = Entity(display=name, parent=parent, aliases=merged_aliases)
         self._data[key] = ent
         self._rebuild_alias_index()
         self._save()

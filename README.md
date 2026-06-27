@@ -26,6 +26,12 @@ plugin, fork, or API.
 - 🧩 **Learns over time** — remembers the people/places you've used so they're
   one click next time. (Face-recognition auto-tagging is a clean optional
   module, off by default — see Roadmap.)
+- 🌳 **Composable hierarchy** — teach a place's parent *once* (`Phoenix` =
+  `Location > USA > Arizona`); after that, anything you nest under it
+  (`Moms House` = `Phoenix`) inherits the whole ancestry automatically. Mention
+  both a place and something inside it and Tag-Assist collapses to the deepest,
+  since TagStudio already makes the parents searchable. New names auto-complete
+  from what you've already taught.
 
 ## Design principles
 

@@ -66,7 +66,7 @@ class FaceEngine:
         people = [
             e.display
             for e in self._entities.all()
-            if e.chain and e.chain[0] == "People"
+            if (chain := self._entities.resolve_chain(e.display)) and chain[0] == "People"
         ]
         return sorted(people)
 

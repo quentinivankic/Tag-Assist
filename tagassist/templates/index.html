@@ -118,6 +118,10 @@
       </div>
     </form>
 
+    <datalist id="known-nodes">
+      {% for n in known_nodes %}<option value="{{ n }}"></option>{% endfor %}
+    </datalist>
+
     <div id="teach-area"></div>
 
     <div id="confirmed-wrap" style="display:none">
@@ -158,21 +162,41 @@ function renderConfirmed(){
   });
   wrap.style.display = confirmed.length ? "" : "none";
 }
+// Collapse to the deepest: drop any confirmed entity that is an ancestor of
+// another confirmed entity (it's already covered via the child's nesting).
+function collapseConfirmed(){
+  const ancestors = new Set();
+  confirmed.forEach(e => (e.chain || []).forEach(c => ancestors.add(c.toLowerCase())));
+  confirmed = confirmed.filter(e => !ancestors.has(keyOf(e.name)));
+}
 function addConfirmed(name, chain){
   name = name.trim();
   if(!name) return;
   if(!confirmed.some(e => keyOf(e.name) === keyOf(name))) confirmed.push({name, chain: chain || []});
+  collapseConfirmed();
   renderConfirmed();
 }
 
 // Render a "what is X?" teach card for an unknown entity.
+// Auto-resolve any still-pending teach card that just became known (e.g. after
+// teaching a deep place path, the leftover "What is Phoenix?" card disappears).
+function resolvePending(node){
+  document.querySelectorAll("#teach-area .teach").forEach(c => {
+    if(c.dataset.entity === node.name.toLowerCase()){
+      addConfirmed(node.name, node.chain);
+      c.remove();
+    }
+  });
+}
+
 function teachCard(name, suggested){
   const card = document.createElement("div");
   card.className = "teach";
+  card.dataset.entity = name.toLowerCase();
   card.innerHTML = `
     <div class="q">What is <b>${name}</b>? <span style="color:var(--muted)">— a path like "Pets > Dog", or just "Dog"</span></div>
     <div class="row">
-      <input type="text" value="${suggested || ''}" placeholder="e.g. Pets > Dog">
+      <input type="text" list="known-nodes" value="${suggested || ''}" placeholder="e.g. Pets > Dog">
       <button type="button" class="small primary">Got it</button>
       <button type="button" class="small ghost" data-skip>skip</button>
     </div>`;
@@ -188,6 +212,7 @@ function teachCard(name, suggested){
       const data = await r.json();
       addConfirmed(data.name, data.chain);
       card.remove();
+      (data.resolved || []).forEach(resolvePending);
       maybeDoneTeaching();
     } catch(err){ setStatus("learn failed: " + err, true); }
   };
