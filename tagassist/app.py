@@ -17,17 +17,24 @@ from fastapi import FastAPI, Form, HTTPException, Request
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse
 from fastapi.templating import Jinja2Templates
 
+import json
+
 from . import exif, interview, llm
 from .config import Config
+from .entities import EntityStore
 from .faces import FaceEngine
 from .tagstudio import TagStudioLibrary
 
 _TEMPLATES = Jinja2Templates(directory=str(Path(__file__).parent / "templates"))
 
+# Which top-level category each interview box suggests for *new* entities.
+_BOX_CATEGORY = {"people": "People", "location": "Location", "context": "Context"}
+
 
 def create_app(config: Config) -> FastAPI:
     app = FastAPI(title="Tag-Assist")
-    faces = FaceEngine(config.library)
+    entities = EntityStore(config.library)
+    faces = FaceEngine(config.library, entities)
 
     def open_lib() -> TagStudioLibrary:
         return TagStudioLibrary(config.library).connect()
@@ -101,38 +108,63 @@ def create_app(config: Config) -> FastAPI:
         location: str = Form(""),
         context: str = Form(""),
     ):
-        """Parse answers into suggested tags (no DB writes)."""
-        raw = {"People": people, "Location": location, "Context": context}
-        suggestions: dict[str, list[str]] = {}
-        for category, answer in raw.items():
-            tags = llm.parse_answer(answer, category)
-            if tags:
-                suggestions[category] = tags
-        return JSONResponse({"suggestions": suggestions, "llm": llm.available()})
+        """Parse answers into entity items (no DB writes).
+
+        Each item is either ``known`` (already learned -> its full nested chain
+        is returned for silent auto-apply) or ``unknown`` (needs a one-time
+        "what is this?" answer, pre-suggesting the box's category as the top).
+        """
+        known_names = entities.names()
+        items: list[dict] = []
+        seen: set[str] = set()
+        for box, answer in (("people", people), ("location", location), ("context", context)):
+            category = _BOX_CATEGORY[box]
+            for name in llm.parse_answer(answer, category, known_names):
+                ent = entities.lookup(name)
+                key = (ent.display if ent else name).lower()
+                if key in seen:
+                    continue
+                seen.add(key)
+                if ent:
+                    items.append({
+                        "name": ent.display,
+                        "status": "known",
+                        "chain": ent.chain,
+                    })
+                else:
+                    items.append({
+                        "name": name,
+                        "status": "unknown",
+                        "suggested": category,
+                    })
+        return JSONResponse({"items": items, "llm": llm.available()})
+
+    @app.post("/learn")
+    def learn(name: str = Form(...), chain: str = Form("")):
+        """Teach the app what an entity is (chain like 'Pets > Dog'). Remembered."""
+        ent = entities.learn(name, chain)
+        return JSONResponse({"name": ent.display, "chain": ent.chain})
 
     @app.post("/commit")
-    def commit(
-        entry_id: int = Form(...),
-        people: str = Form(""),
-        location: str = Form(""),
-        context: str = Form(""),
-    ):
-        """Write confirmed, comma-separated tags into TagStudio."""
-        tags_by_category = {
-            "People": [t.strip() for t in people.split(",") if t.strip()],
-            "Location": [t.strip() for t in location.split(",") if t.strip()],
-            "Context": [t.strip() for t in context.split(",") if t.strip()],
-        }
-        tags_by_category = {k: v for k, v in tags_by_category.items() if v}
+    def commit(entry_id: int = Form(...), entities_json: str = Form("[]")):
+        """Write confirmed entities (each {name, chain}) into TagStudio, nested."""
+        try:
+            payload = json.loads(entities_json)
+        except ValueError:
+            raise HTTPException(400, "Bad entities payload")
+        added: list[str] = []
         with open_lib() as lib:
             entry = lib.get_entry(entry_id)
             if entry is None:
                 raise HTTPException(404, "Entry not found")
-            added = lib.apply_tags(entry_id, tags_by_category)
+            for item in payload:
+                name = (item.get("name") or "").strip()
+                if not name:
+                    continue
+                chain = [c for c in item.get("chain", []) if c and c.strip()]
+                if lib.apply_entity(entry_id, name, chain):
+                    added.append(name)
             all_ids = [e.id for e in lib.entries()]
-        # Remember people for quick reuse next time.
-        for person in tags_by_category.get("People", []):
-            faces.remember_person(person)
 
         idx = all_ids.index(entry_id) if entry_id in all_ids else -1
         next_id = all_ids[idx + 1] if 0 <= idx < len(all_ids) - 1 else None

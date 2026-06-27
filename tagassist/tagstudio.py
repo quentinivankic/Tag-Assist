@@ -333,6 +333,41 @@ class TagStudioLibrary:
         )
         return True
 
+    def apply_entity(
+        self, entry_id: int, leaf_name: str, chain: list[str]
+    ) -> bool:
+        """Attach a learned entity to an entry, building its nested hierarchy.
+
+        ``chain`` is the parent path from broadest to direct parent
+        (e.g. ["Pets", "Dog"]); ``leaf_name`` is the entity itself ("Stella").
+        We create/reuse each tag, link consecutive pairs in ``tag_parents``
+        (Pets->Dog->Stella), and attach ONLY the leaf to the entry — TagStudio
+        inherits parent tags in search, so the nesting comes for free.
+
+        Returns True if the leaf was newly attached to this entry. Commits on
+        success; rolls back on failure.
+        """
+        try:
+            parent_id: int | None = None
+            # Build the parent chain; every level above the leaf is a category.
+            for level in chain:
+                level = level.strip()
+                if not level:
+                    continue
+                level_id = self.get_or_create_tag(level, is_category=True)
+                if parent_id is not None:
+                    self._link_parent(parent_id, level_id)
+                parent_id = level_id
+            leaf_id = self.get_or_create_tag(leaf_name)
+            if parent_id is not None:
+                self._link_parent(parent_id, leaf_id)
+            newly = self.tag_entry(entry_id, leaf_id)
+            self.conn.commit()
+            return newly
+        except Exception:
+            self.conn.rollback()
+            raise
+
     def apply_tags(
         self, entry_id: int, tags_by_category: dict[str, list[str]]
     ) -> list[str]:

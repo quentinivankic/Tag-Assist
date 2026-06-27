@@ -36,6 +36,27 @@ def test_preserves_internal_capitals():
     assert interview.parse_answer("McNally", "People") == ["McNally"]
 
 
+def test_forgiving_split_on_period_and_preposition():
+    # The real-world bug: "Fredericia, Denmark. In Vivaldi Cafe" used to keep
+    # "Denmark. In Vivaldi Cafe" as one junk tag.
+    assert interview.parse_answer(
+        "Fredericia, Denmark. In Vivaldi Cafe", "Location"
+    ) == ["Fredericia", "Denmark", "Vivaldi Cafe"]
+
+
+def test_period_protected_for_abbreviations():
+    assert interview.parse_answer("St. Louis", "Location") == ["St. Louis"]
+
+
+def test_known_multiword_entity_survives_splitting():
+    # "Mom and Dad" contains the splitter "and"; greedy known-match protects it.
+    out = interview.parse_answer(
+        "Mom and Dad and Alice", "People", known_names=["Mom and Dad"]
+    )
+    assert "Mom and Dad" in out
+    assert "Alice" in out
+
+
 def test_parse_interview_maps_categories():
     answers = {"people": "Alice", "location": "Phoenix", "context": "birthday"}
     result = interview.parse_interview(answers)

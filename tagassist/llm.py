@@ -75,11 +75,18 @@ def _extract_json_array(text: str) -> list[str] | None:
     return [str(x).strip() for x in data if str(x).strip()]
 
 
-def parse_answer(answer: str, category: str, *, timeout: float = 20.0) -> list[str]:
+def parse_answer(
+    answer: str,
+    category: str,
+    known_names: list[str] | None = None,
+    *,
+    timeout: float = 20.0,
+) -> list[str]:
     """LLM-normalize an answer into tags, falling back to the rule parser.
 
     Always returns a usable list; never raises. The fallback guarantees the
-    interview works identically with or without a model present.
+    interview works identically with or without a model present. ``known_names``
+    is forwarded to the rule parser so learned multi-word entities survive.
     """
     if available():
         prompt_text = _PROMPT.format(
@@ -102,4 +109,4 @@ def parse_answer(answer: str, category: str, *, timeout: float = 20.0) -> list[s
                         seen.add(t.lower())
                         out.append(t)
                 return out
-    return interview.parse_answer(answer, category)
+    return interview.parse_answer(answer, category, known_names)

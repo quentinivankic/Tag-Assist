@@ -34,10 +34,12 @@ class FaceEngine:
     it later is a drop-in change.
     """
 
-    def __init__(self, library_root: str | Path):
+    def __init__(self, library_root: str | Path, entities=None):
+        from .entities import EntityStore
+
         self.cache_dir = Path(library_root) / CACHE_DIRNAME
         self.cache_dir.mkdir(parents=True, exist_ok=True)
-        self._names_file = self.cache_dir / "known_people.json"
+        self._entities = entities if entities is not None else EntityStore(library_root)
         self._backend = self._detect_backend()
 
     @staticmethod
@@ -60,21 +62,21 @@ class FaceEngine:
     # -- learned-names store (works regardless of backend) ---------------
 
     def known_people(self) -> list[str]:
-        if self._names_file.exists():
-            try:
-                return sorted(json.loads(self._names_file.read_text()))
-            except Exception:
-                return []
-        return []
+        """Display names of learned entities that are people (chain top == People)."""
+        people = [
+            e.display
+            for e in self._entities.all()
+            if e.chain and e.chain[0] == "People"
+        ]
+        return sorted(people)
 
     def remember_person(self, name: str) -> None:
-        """Record that a person name has been used, for quick reuse in the UI."""
+        """Record a person for quick reuse, without clobbering a richer chain."""
         name = name.strip()
         if not name:
             return
-        people = set(self.known_people())
-        people.add(name)
-        self._names_file.write_text(json.dumps(sorted(people), indent=2))
+        if self._entities.lookup(name) is None:
+            self._entities.learn(name, ["People"])
 
     # -- recognition (no-op until a backend is enabled) ------------------
 

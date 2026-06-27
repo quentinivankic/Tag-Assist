@@ -62,6 +62,38 @@ def test_idempotent_tagging(sample_lib):
         assert added_again == []  # nothing new added
 
 
+def test_apply_entity_builds_nested_chain(sample_lib):
+    with TagStudioLibrary(sample_lib) as lib:
+        entry = lib.entries(limit=1)[0]
+        newly = lib.apply_entity(entry.id, "Stella", ["Pets", "Dog"])
+        assert newly is True
+        # Only the leaf is attached to the entry...
+        assert lib.tags_for_entry(entry.id) == ["Stella"]
+        # ...but the full hierarchy exists: Pets -> Dog -> Stella
+        assert lib.tags_under_category("Pets") == ["Dog"]
+        assert lib.tags_under_category("Dog") == ["Stella"]
+
+
+def test_apply_entity_reuses_shared_parents(sample_lib):
+    with TagStudioLibrary(sample_lib) as lib:
+        e1, e2 = lib.entries(limit=2)
+        lib.apply_entity(e1.id, "Stella", ["Pets", "Dog"])
+        lib.apply_entity(e2.id, "Rex", ["Pets", "Dog"])
+        # Dog has two children now, Pets still has exactly one child (Dog)
+        assert lib.tags_under_category("Dog") == ["Rex", "Stella"]
+        assert lib.tags_under_category("Pets") == ["Dog"]
+        # No duplicate Dog/Pets tags were created
+        assert sum(1 for n in lib.all_tag_names() if n == "Dog") == 1
+        assert sum(1 for n in lib.all_tag_names() if n == "Pets") == 1
+
+
+def test_apply_entity_empty_chain(sample_lib):
+    with TagStudioLibrary(sample_lib) as lib:
+        entry = lib.entries(limit=1)[0]
+        assert lib.apply_entity(entry.id, "sunset", []) is True
+        assert lib.tags_for_entry(entry.id) == ["sunset"]
+
+
 def test_missing_library_raises(tmp_path):
     with pytest.raises(TagStudioError):
         TagStudioLibrary(tmp_path / "nope").connect()

@@ -6,7 +6,7 @@
 <title>Tag-Assist — {{ entry.filename }}</title>
 <style>
   :root { --bg:#15171c; --panel:#1f2229; --line:#30343d; --accent:#6aa9ff;
-          --accent2:#7ee0a0; --text:#e6e8ec; --muted:#9aa0ab; }
+          --accent2:#7ee0a0; --warn:#ffce6a; --text:#e6e8ec; --muted:#9aa0ab; }
   * { box-sizing: border-box; }
   body { margin:0; font:15px/1.5 system-ui,Segoe UI,Roboto,sans-serif;
          background:var(--bg); color:var(--text); }
@@ -35,27 +35,35 @@
            border:1px solid var(--line); background:#161922; color:var(--text);
            font-size:15px; }
   input[type=text]:focus{ outline:none; border-color:var(--accent); }
-  .chips { display:flex; flex-wrap:wrap; gap:6px; margin-top:6px; min-height:4px; }
+  .section-title { font-size:13px; color:var(--muted); margin:18px 0 6px;
+           text-transform:uppercase; letter-spacing:.5px; }
+  .chips { display:flex; flex-wrap:wrap; gap:8px; }
   .chip { background:#202634; border:1px solid var(--line); color:var(--text);
-          padding:4px 10px 4px 12px; border-radius:999px; font-size:13px;
-          display:inline-flex; align-items:center; gap:8px; cursor:default; }
+          padding:5px 10px 5px 12px; border-radius:10px; font-size:13px;
+          display:inline-flex; align-items:center; gap:8px; }
   .chip b { font-weight:600; }
+  .chip .path { color:var(--muted); font-size:12px; }
   .chip .x { cursor:pointer; color:var(--muted); font-weight:700; }
   .chip .x:hover { color:#ff8a8a; }
+  .teach { background:#23262f; border:1px dashed var(--warn); border-radius:10px;
+          padding:10px 12px; margin-bottom:8px; }
+  .teach .q { font-size:14px; margin-bottom:6px; }
+  .teach .q b { color:var(--warn); }
+  .teach .row { display:flex; gap:8px; }
+  .teach input { flex:1; }
   .reuse { margin-top:6px; }
-  .reuse span { cursor:pointer; color:var(--accent); font-size:13px;
-          margin-right:10px; }
+  .reuse span { cursor:pointer; color:var(--accent); font-size:13px; margin-right:10px; }
   .reuse span:hover { text-decoration:underline; }
   .actions { display:flex; gap:10px; margin-top:22px; align-items:center; }
   button { font-size:15px; padding:10px 16px; border-radius:8px; cursor:pointer;
            border:1px solid var(--line); background:#262b35; color:var(--text); }
   button.primary { background:var(--accent); border-color:var(--accent);
            color:#0a0f1a; font-weight:700; }
+  button.small { padding:8px 12px; font-size:14px; }
   button.ghost { background:transparent; }
   button:disabled { opacity:.5; cursor:default; }
   .nav { margin-left:auto; display:flex; gap:8px; }
   .status { margin-top:12px; min-height:20px; font-size:14px; color:var(--accent2); }
-  .cat-suggest { margin-top:6px; font-size:13px; color:var(--muted); }
   a.navlink { color:var(--accent); text-decoration:none; }
 </style>
 </head>
@@ -89,118 +97,160 @@
   </section>
 
   <section class="panel">
-    <form id="interview" data-entry="{{ entry.id }}">
+    <form id="interview" data-entry="{{ entry.id }}" onsubmit="return false">
       {% for q in questions %}
       <label>{{ q.prompt }} <span class="hint">— {{ q.hint }}</span></label>
       <input type="text" name="{{ q.key }}" data-category="{{ q.category }}"
              autocomplete="off" placeholder="type in plain English…">
-      <div class="chips" data-chips="{{ q.category }}"></div>
       {% if q.key == 'people' and people_hint %}
-      <div class="reuse">reuse:
-        {% for p in people_hint %}<span data-add="people" data-val="{{ p }}">{{ p }}</span>{% endfor %}
-      </div>
-      {% endif %}
-      {% if q.key == 'context' and meta.suggested_context_tags() %}
-      <div class="reuse">from EXIF:
-        {% for c in meta.suggested_context_tags() %}<span data-add="context" data-val="{{ c }}">{{ c }}</span>{% endfor %}
+      <div class="reuse">people you've tagged before:
+        {% for p in people_hint %}<span data-reuse="{{ p }}">{{ p }}</span>{% endfor %}
       </div>
       {% endif %}
       {% endfor %}
 
       <div class="actions">
         <button type="button" class="primary" id="preview-btn">Suggest tags →</button>
-        <button type="button" class="primary" id="commit-btn" style="display:none">✓ Save to TagStudio</button>
         <div class="nav">
           {% if prev_id %}<a class="navlink" href="/photo/{{ prev_id }}"><button type="button" class="ghost">‹ prev</button></a>{% endif %}
           {% if next_id %}<a class="navlink" href="/photo/{{ next_id }}"><button type="button" class="ghost">skip ›</button></a>{% endif %}
         </div>
       </div>
-      <div class="status" id="status"></div>
     </form>
+
+    <div id="teach-area"></div>
+
+    <div id="confirmed-wrap" style="display:none">
+      <div class="section-title">Will be saved (nested into TagStudio)</div>
+      <div class="chips" id="confirmed"></div>
+      <div class="actions">
+        <button type="button" class="primary" id="commit-btn">✓ Save to TagStudio</button>
+      </div>
+    </div>
+
+    <div class="status" id="status"></div>
   </section>
 </main>
 
 <script>
 const KEYS = [{% for q in questions %}"{{ q.key }}"{% if not loop.last %},{% endif %}{% endfor %}];
-const CAT = { {% for q in questions %}"{{ q.key }}":"{{ q.category }}"{% if not loop.last %},{% endif %}{% endfor %} };
-// suggestion chips per category (confirmed tags to be written)
-const chips = { People:[], Location:[], Context:[] };
 const nextId = {{ next_id if next_id is not none else 'null' }};
 
-function catForKey(k){ return CAT[k]; }
-function renderChips(cat){
-  const box = document.querySelector(`[data-chips="${cat}"]`);
+// Confirmed entities to write: [{name, chain:[...]}]
+let confirmed = [];
+
+function pathLabel(chain){
+  return chain && chain.length ? `<span class="path">⊂ ${chain.slice().reverse().join(" ⊂ ")}</span>` : "";
+}
+function keyOf(name){ return name.trim().toLowerCase(); }
+
+function renderConfirmed(){
+  const wrap = document.getElementById("confirmed-wrap");
+  const box = document.getElementById("confirmed");
   box.innerHTML = "";
-  chips[cat].forEach((tag, i) => {
+  confirmed.forEach((e, i) => {
     const el = document.createElement("span");
     el.className = "chip";
-    el.innerHTML = `<b></b><span class="x">×</span>`;
-    el.querySelector("b").textContent = tag;
-    el.querySelector(".x").onclick = () => { chips[cat].splice(i,1); renderChips(cat); showCommit(); };
+    el.innerHTML = `<b></b>${pathLabel(e.chain)}<span class="x">×</span>`;
+    el.querySelector("b").textContent = e.name;
+    el.querySelector(".x").onclick = () => { confirmed.splice(i,1); renderConfirmed(); };
     box.appendChild(el);
   });
+  wrap.style.display = confirmed.length ? "" : "none";
 }
-function addChip(cat, val){
-  val = val.trim();
-  if(!val) return;
-  if(!chips[cat].some(t => t.toLowerCase() === val.toLowerCase())) chips[cat].push(val);
-  renderChips(cat);
-  showCommit();
-}
-function anyChips(){ return Object.values(chips).some(a => a.length); }
-function showCommit(){
-  document.getElementById("commit-btn").style.display = anyChips() ? "" : "none";
+function addConfirmed(name, chain){
+  name = name.trim();
+  if(!name) return;
+  if(!confirmed.some(e => keyOf(e.name) === keyOf(name))) confirmed.push({name, chain: chain || []});
+  renderConfirmed();
 }
 
-document.querySelectorAll("[data-add]").forEach(s => {
-  s.onclick = () => addChip(catForKey(s.dataset.add), s.dataset.val);
+// Render a "what is X?" teach card for an unknown entity.
+function teachCard(name, suggested){
+  const card = document.createElement("div");
+  card.className = "teach";
+  card.innerHTML = `
+    <div class="q">What is <b>${name}</b>? <span style="color:var(--muted)">— a path like "Pets > Dog", or just "Dog"</span></div>
+    <div class="row">
+      <input type="text" value="${suggested || ''}" placeholder="e.g. Pets > Dog">
+      <button type="button" class="small primary">Got it</button>
+      <button type="button" class="small ghost" data-skip>skip</button>
+    </div>`;
+  const input = card.querySelector("input");
+  const save = card.querySelector("button.primary");
+  input.addEventListener("keydown", e => { if(e.key === "Enter"){ e.preventDefault(); save.click(); }});
+  save.onclick = async () => {
+    const fd = new FormData();
+    fd.append("name", name);
+    fd.append("chain", input.value);
+    try {
+      const r = await fetch("/learn", { method:"POST", body: fd });
+      const data = await r.json();
+      addConfirmed(data.name, data.chain);
+      card.remove();
+      maybeDoneTeaching();
+    } catch(err){ setStatus("learn failed: " + err, true); }
+  };
+  card.querySelector("[data-skip]").onclick = () => { card.remove(); maybeDoneTeaching(); };
+  return card;
+}
+
+function setStatus(msg, isError){
+  const s = document.getElementById("status");
+  s.style.color = isError ? "#ff8a8a" : "var(--accent2)";
+  s.textContent = msg;
+}
+function maybeDoneTeaching(){
+  if(!document.querySelector("#teach-area .teach")){
+    if(confirmed.length) setStatus("All set — review below and save.");
+  }
+}
+
+document.querySelectorAll("[data-reuse]").forEach(s => {
+  s.onclick = () => { document.querySelector('input[name=people]').value += (document.querySelector('input[name=people]').value ? ", " : "") + s.dataset.reuse; };
 });
 
 document.getElementById("preview-btn").onclick = async () => {
-  const status = document.getElementById("status");
-  status.style.color = "var(--muted)"; status.textContent = "thinking…";
+  setStatus("thinking…");
+  document.getElementById("teach-area").innerHTML = "";
   const fd = new FormData();
   KEYS.forEach(k => fd.append(k, document.querySelector(`[name="${k}"]`).value));
   let data;
   try {
     const r = await fetch("/preview", { method:"POST", body: fd });
     data = await r.json();
-  } catch(e){ status.style.color="#ff8a8a"; status.textContent="preview failed: "+e; return; }
-  Object.entries(data.suggestions || {}).forEach(([cat, tags]) => tags.forEach(t => addChip(cat, t)));
-  status.style.color = "var(--accent2)";
-  status.textContent = anyChips()
-    ? `Suggested tags below — edit, then save.${data.llm ? " (via local LLM)" : ""}`
-    : "No tags found in your answers.";
+  } catch(e){ setStatus("preview failed: " + e, true); return; }
+
+  const teachArea = document.getElementById("teach-area");
+  let unknowns = 0;
+  (data.items || []).forEach(item => {
+    if(item.status === "known"){
+      addConfirmed(item.name, item.chain);     // auto-applied silently
+    } else {
+      unknowns++;
+      teachArea.appendChild(teachCard(item.name, item.suggested));
+    }
+  });
+  if((data.items || []).length === 0){ setStatus("No names found in your answers.", false); return; }
+  setStatus(unknowns
+    ? `Tell me what the new ${unknowns === 1 ? "name is" : "names are"} — known ones are already added below.`
+    : `All recognized — review below and save.${data.llm ? " (via local LLM)" : ""}`);
 };
 
 document.getElementById("commit-btn").onclick = async () => {
-  const status = document.getElementById("status");
+  setStatus("saving…");
   const fd = new FormData();
   fd.append("entry_id", document.getElementById("interview").dataset.entry);
-  fd.append("people", chips.People.join(","));
-  fd.append("location", chips.Location.join(","));
-  fd.append("context", chips.Context.join(","));
-  status.style.color = "var(--muted)"; status.textContent = "saving…";
+  fd.append("entities_json", JSON.stringify(confirmed));
   let data;
   try {
     const r = await fetch("/commit", { method:"POST", body: fd });
     data = await r.json();
-  } catch(e){ status.style.color="#ff8a8a"; status.textContent="save failed: "+e; return; }
-  status.style.color = "var(--accent2)";
-  status.textContent = `✓ Wrote ${data.added.length} tag(s) to TagStudio. ` +
-    (data.next_id ? "Loading next photo…" : "That was the last photo.");
-  if (data.next_id) setTimeout(() => location.href = `/photo/${data.next_id}`, 700);
+  } catch(e){ setStatus("save failed: " + e, true); return; }
+  setStatus(`✓ Wrote ${data.added.length} tag(s) to TagStudio. ` +
+    (data.next_id ? "Loading next photo…" : "That was the last photo."));
+  if(data.next_id) setTimeout(() => location.href = `/photo/${data.next_id}`, 800);
 };
-
-// Enter in a field = add its raw value as a chip for that category.
-document.querySelectorAll('input[type=text]').forEach(inp => {
-  inp.addEventListener("keydown", e => {
-    if(e.key === "Enter"){ e.preventDefault();
-      inp.value.split(",").forEach(v => addChip(inp.dataset.category, v));
-      inp.value = "";
-    }
-  });
-});
 </script>
 </body>
 </html>
