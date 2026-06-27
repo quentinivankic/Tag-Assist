@@ -26,6 +26,7 @@ parent links automatically on load.
 
 from __future__ import annotations
 
+import difflib
 import json
 import re
 from dataclasses import dataclass, field
@@ -43,6 +44,13 @@ class Entity:
     display: str
     parent: str | None = None  # display name of the parent entity (None = root)
     aliases: list[str] = field(default_factory=list)
+
+
+def _norm_tight(s: str) -> str:
+    """Lowercase and drop everything but letters/digits, so 'camel back
+    mountain', 'Camelback Mountain' and "Mom's House"/'moms house' compare
+    equal once spacing/punctuation/case are removed."""
+    return re.sub(r"[^a-z0-9]+", "", s.lower())
 
 
 def parse_chain(text: str) -> list[str]:
@@ -164,6 +172,30 @@ class EntityStore:
             d for d in canon
             if not any(o != d and self.is_ancestor(d, o) for o in canon)
         ]
+
+    def suggest_match(self, name: str, *, cutoff: float = 0.85) -> str | None:
+        """Closest known entity for an UNrecognized name, or None.
+
+        Catches spacing/punctuation/case differences ('camel back mountain' vs
+        'camelback mountain') exactly, and small typos via edit-distance. The
+        caller always confirms with the user, so this only proposes.
+        """
+        q = _norm_tight(name)
+        if len(q) < 3:
+            return None
+        best: str | None = None
+        best_ratio = 0.0
+        for ent in self._data.values():
+            for cand in (ent.display, *ent.aliases):
+                c = _norm_tight(cand)
+                if not c:
+                    continue
+                if c == q:  # same once spacing/punct/case removed
+                    return ent.display
+                ratio = difflib.SequenceMatcher(None, q, c).ratio()
+                if ratio > best_ratio:
+                    best_ratio, best = ratio, ent.display
+        return best if best_ratio >= cutoff else None
 
     def names(self) -> list[str]:
         """All known display names + aliases (longest first), for greedy

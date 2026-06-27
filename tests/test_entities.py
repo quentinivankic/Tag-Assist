@@ -75,6 +75,41 @@ def test_collapse_descendants(tmp_path):
     assert set(store.collapse_descendants(["Alice", "Moms House"])) == {"Alice", "Moms House"}
 
 
+def test_suggest_match_spacing_and_case(tmp_path):
+    store = EntityStore(tmp_path)
+    store.learn("Camelback Mountain", "Location > USA > Arizona")
+    assert store.suggest_match("camel back mountain") == "Camelback Mountain"
+    assert store.suggest_match("CAMELBACK MOUNTAIN") == "Camelback Mountain"
+
+
+def test_suggest_match_punctuation(tmp_path):
+    store = EntityStore(tmp_path)
+    store.learn("Mom's House", "People")
+    assert store.suggest_match("moms house") == "Mom's House"
+
+
+def test_suggest_match_typo(tmp_path):
+    store = EntityStore(tmp_path)
+    store.learn("Camelback Mountain", "Location")
+    assert store.suggest_match("camelbak mountain") == "Camelback Mountain"
+
+
+def test_suggest_match_no_false_positive(tmp_path):
+    store = EntityStore(tmp_path)
+    store.learn("Phoenix", "Location")
+    assert store.suggest_match("Denmark") is None
+    assert store.suggest_match("xy") is None  # too short
+
+
+def test_alias_makes_variant_recognized(tmp_path):
+    store = EntityStore(tmp_path)
+    store.learn("Camelback Mountain", "Location > USA > Arizona")
+    store.add_alias("Camelback Mountain", "camel back mountain")
+    # The variant now resolves directly, no fuzzy needed.
+    assert store.lookup("camel back mountain").display == "Camelback Mountain"
+    assert store.full_path("camel back mountain")[-1] == "Camelback Mountain"
+
+
 def test_names_longest_first_for_greedy_match(tmp_path):
     store = EntityStore(tmp_path)
     store.learn("Vivaldi Cafe", ["Location"])

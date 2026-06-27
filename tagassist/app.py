@@ -141,7 +141,12 @@ def create_app(config: Config) -> FastAPI:
                 "chain": entities.resolve_chain(name),
             })
         for name, category in unknown_found:
-            items.append({"name": name, "status": "unknown", "suggested": category})
+            items.append({
+                "name": name,
+                "status": "unknown",
+                "suggested": category,
+                "did_you_mean": entities.suggest_match(name),
+            })
         return JSONResponse({"items": items, "llm": llm.available()})
 
     @app.post("/learn")
@@ -162,6 +167,21 @@ def create_app(config: Config) -> FastAPI:
             "name": ent.display,
             "chain": entities.resolve_chain(ent.display),
             "resolved": resolved,
+        })
+
+    @app.post("/alias")
+    def alias(name: str = Form(...), target: str = Form(...)):
+        """Record that a typed spelling (``name``) is the same as an existing
+        entity (``target``), so that spelling is recognized instantly next time.
+        Returns the target's canonical name + resolved chain to apply now.
+        """
+        ent = entities.lookup(target)
+        if ent is None:
+            raise HTTPException(404, "Unknown target entity")
+        entities.add_alias(target, name)
+        return JSONResponse({
+            "name": ent.display,
+            "chain": entities.resolve_chain(ent.display),
         })
 
     @app.post("/commit")

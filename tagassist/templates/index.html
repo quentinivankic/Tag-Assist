@@ -189,34 +189,63 @@ function resolvePending(node){
   });
 }
 
-function teachCard(name, suggested){
+function teachCard(name, suggested, didYouMean){
   const card = document.createElement("div");
   card.className = "teach";
   card.dataset.entity = name.toLowerCase();
-  card.innerHTML = `
-    <div class="q">What is <b>${name}</b>? <span style="color:var(--muted)">— a path like "Pets > Dog", or just "Dog"</span></div>
-    <div class="row">
-      <input type="text" list="known-nodes" value="${suggested || ''}" placeholder="e.g. Pets > Dog">
-      <button type="button" class="small primary">Got it</button>
-      <button type="button" class="small ghost" data-skip>skip</button>
-    </div>`;
-  const input = card.querySelector("input");
-  const save = card.querySelector("button.primary");
-  input.addEventListener("keydown", e => { if(e.key === "Enter"){ e.preventDefault(); save.click(); }});
-  save.onclick = async () => {
-    const fd = new FormData();
-    fd.append("name", name);
-    fd.append("chain", input.value);
-    try {
-      const r = await fetch("/learn", { method:"POST", body: fd });
-      const data = await r.json();
-      addConfirmed(data.name, data.chain);
-      card.remove();
-      (data.resolved || []).forEach(resolvePending);
-      maybeDoneTeaching();
-    } catch(err){ setStatus("learn failed: " + err, true); }
-  };
-  card.querySelector("[data-skip]").onclick = () => { card.remove(); maybeDoneTeaching(); };
+
+  // The normal "teach me the parent path" body.
+  function renderTeach(){
+    card.innerHTML = `
+      <div class="q">What is <b>${name}</b>? <span style="color:var(--muted)">— a path like "Pets > Dog", or just "Dog"</span></div>
+      <div class="row">
+        <input type="text" list="known-nodes" value="${suggested || ''}" placeholder="e.g. Pets > Dog">
+        <button type="button" class="small primary">Got it</button>
+        <button type="button" class="small ghost" data-skip>skip</button>
+      </div>`;
+    const input = card.querySelector("input");
+    const save = card.querySelector("button.primary");
+    input.addEventListener("keydown", e => { if(e.key === "Enter"){ e.preventDefault(); save.click(); }});
+    save.onclick = async () => {
+      const fd = new FormData();
+      fd.append("name", name);
+      fd.append("chain", input.value);
+      try {
+        const r = await fetch("/learn", { method:"POST", body: fd });
+        const data = await r.json();
+        addConfirmed(data.name, data.chain);
+        card.remove();
+        (data.resolved || []).forEach(resolvePending);
+        maybeDoneTeaching();
+      } catch(err){ setStatus("learn failed: " + err, true); }
+    };
+    card.querySelector("[data-skip]").onclick = () => { card.remove(); maybeDoneTeaching(); };
+  }
+
+  // The "did you mean an existing one?" body — only when a near-match exists.
+  function renderDidYouMean(match){
+    card.innerHTML = `
+      <div class="q">You typed <b>${name}</b> — did you mean <b>${match}</b>?</div>
+      <div class="row">
+        <button type="button" class="small primary" data-yes>Yes, same thing</button>
+        <button type="button" class="small ghost" data-no>No, it's new</button>
+      </div>`;
+    card.querySelector("[data-yes]").onclick = async () => {
+      const fd = new FormData();
+      fd.append("name", name);     // the typed spelling -> becomes an alias
+      fd.append("target", match);
+      try {
+        const r = await fetch("/alias", { method:"POST", body: fd });
+        const data = await r.json();
+        addConfirmed(data.name, data.chain);
+        card.remove();
+        maybeDoneTeaching();
+      } catch(err){ setStatus("alias failed: " + err, true); }
+    };
+    card.querySelector("[data-no]").onclick = () => renderTeach();
+  }
+
+  if(didYouMean) renderDidYouMean(didYouMean); else renderTeach();
   return card;
 }
 
@@ -253,7 +282,7 @@ document.getElementById("preview-btn").onclick = async () => {
       addConfirmed(item.name, item.chain);     // auto-applied silently
     } else {
       unknowns++;
-      teachArea.appendChild(teachCard(item.name, item.suggested));
+      teachArea.appendChild(teachCard(item.name, item.suggested, item.did_you_mean));
     }
   });
   if((data.items || []).length === 0){ setStatus("No names found in your answers.", false); return; }
