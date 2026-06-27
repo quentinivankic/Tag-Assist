@@ -1,0 +1,16 @@
+__pycache__/
+*.pyc
+.venv/
+venv/
+*.egg-info/
+.pytest_cache/
+.DS_Store
+
+# Local data / generated samples
+/tmp-lib/
+sample-lib/
+*.sqlite-wal
+*.sqlite-shm
+
+# Tag-Assist learned-state cache (per-library, regenerable)
+.tagassist_cache/

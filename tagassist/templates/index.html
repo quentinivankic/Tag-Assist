@@ -1,0 +1,206 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Tag-Assist — {{ entry.filename }}</title>
+<style>
+  :root { --bg:#15171c; --panel:#1f2229; --line:#30343d; --accent:#6aa9ff;
+          --accent2:#7ee0a0; --text:#e6e8ec; --muted:#9aa0ab; }
+  * { box-sizing: border-box; }
+  body { margin:0; font:15px/1.5 system-ui,Segoe UI,Roboto,sans-serif;
+         background:var(--bg); color:var(--text); }
+  header { display:flex; align-items:center; gap:14px; padding:12px 18px;
+           border-bottom:1px solid var(--line); background:var(--panel); }
+  header .brand { font-weight:700; letter-spacing:.3px; }
+  header .pos { color:var(--muted); }
+  header .badges { margin-left:auto; display:flex; gap:8px; }
+  .badge { font-size:12px; padding:3px 9px; border-radius:999px;
+           border:1px solid var(--line); color:var(--muted); }
+  .badge.on { color:var(--accent2); border-color:var(--accent2); }
+  main { display:grid; grid-template-columns:minmax(0,1.1fr) minmax(0,1fr);
+         gap:22px; max-width:1100px; margin:22px auto; padding:0 18px; }
+  @media (max-width:820px){ main{ grid-template-columns:1fr; } }
+  .photo { background:var(--panel); border:1px solid var(--line);
+           border-radius:12px; padding:12px; }
+  .photo img { width:100%; border-radius:8px; display:block; background:#000; }
+  .meta { margin-top:10px; font-size:13px; color:var(--muted); display:flex;
+          flex-wrap:wrap; gap:6px 14px; }
+  .existing { margin-top:10px; }
+  .panel { background:var(--panel); border:1px solid var(--line);
+           border-radius:12px; padding:18px; }
+  label { display:block; font-weight:600; margin:14px 0 4px; }
+  label .hint { font-weight:400; color:var(--muted); font-size:13px; }
+  input[type=text]{ width:100%; padding:10px 12px; border-radius:8px;
+           border:1px solid var(--line); background:#161922; color:var(--text);
+           font-size:15px; }
+  input[type=text]:focus{ outline:none; border-color:var(--accent); }
+  .chips { display:flex; flex-wrap:wrap; gap:6px; margin-top:6px; min-height:4px; }
+  .chip { background:#202634; border:1px solid var(--line); color:var(--text);
+          padding:4px 10px 4px 12px; border-radius:999px; font-size:13px;
+          display:inline-flex; align-items:center; gap:8px; cursor:default; }
+  .chip b { font-weight:600; }
+  .chip .x { cursor:pointer; color:var(--muted); font-weight:700; }
+  .chip .x:hover { color:#ff8a8a; }
+  .reuse { margin-top:6px; }
+  .reuse span { cursor:pointer; color:var(--accent); font-size:13px;
+          margin-right:10px; }
+  .reuse span:hover { text-decoration:underline; }
+  .actions { display:flex; gap:10px; margin-top:22px; align-items:center; }
+  button { font-size:15px; padding:10px 16px; border-radius:8px; cursor:pointer;
+           border:1px solid var(--line); background:#262b35; color:var(--text); }
+  button.primary { background:var(--accent); border-color:var(--accent);
+           color:#0a0f1a; font-weight:700; }
+  button.ghost { background:transparent; }
+  button:disabled { opacity:.5; cursor:default; }
+  .nav { margin-left:auto; display:flex; gap:8px; }
+  .status { margin-top:12px; min-height:20px; font-size:14px; color:var(--accent2); }
+  .cat-suggest { margin-top:6px; font-size:13px; color:var(--muted); }
+  a.navlink { color:var(--accent); text-decoration:none; }
+</style>
+</head>
+<body>
+<header>
+  <span class="brand">🏷️ Tag-Assist</span>
+  <span class="pos">photo {{ position }} / {{ total }} — {{ entry.filename }}</span>
+  <div class="badges">
+    <span class="badge {{ 'on' if llm_on else '' }}">LLM {{ 'on' if llm_on else 'off' }}</span>
+    <span class="badge {{ 'on' if faces_on else '' }}">faces {{ 'on' if faces_on else 'off' }}</span>
+  </div>
+</header>
+
+<main>
+  <section class="photo">
+    <img src="/image/{{ entry.id }}" alt="{{ entry.filename }}"
+         onerror="this.style.display='none';this.insertAdjacentHTML('afterend','<p style=color:#9aa0ab>Image file not found on disk.</p>')">
+    <div class="meta">
+      {% if meta.year %}<span>📅 {{ meta.year }}</span>{% endif %}
+      {% if meta.has_gps %}<span>📍 GPS {{ "%.4f"|format(meta.gps[0]) }}, {{ "%.4f"|format(meta.gps[1]) }}</span>{% endif %}
+      {% if not meta.year and not meta.has_gps %}<span>no EXIF date/GPS</span>{% endif %}
+    </div>
+    {% if existing_tags %}
+    <div class="existing">
+      <div style="color:var(--muted);font-size:13px;margin-bottom:4px">already tagged:</div>
+      <div class="chips">
+        {% for t in existing_tags %}<span class="chip"><b>{{ t }}</b></span>{% endfor %}
+      </div>
+    </div>
+    {% endif %}
+  </section>
+
+  <section class="panel">
+    <form id="interview" data-entry="{{ entry.id }}">
+      {% for q in questions %}
+      <label>{{ q.prompt }} <span class="hint">— {{ q.hint }}</span></label>
+      <input type="text" name="{{ q.key }}" data-category="{{ q.category }}"
+             autocomplete="off" placeholder="type in plain English…">
+      <div class="chips" data-chips="{{ q.category }}"></div>
+      {% if q.key == 'people' and people_hint %}
+      <div class="reuse">reuse:
+        {% for p in people_hint %}<span data-add="people" data-val="{{ p }}">{{ p }}</span>{% endfor %}
+      </div>
+      {% endif %}
+      {% if q.key == 'context' and meta.suggested_context_tags() %}
+      <div class="reuse">from EXIF:
+        {% for c in meta.suggested_context_tags() %}<span data-add="context" data-val="{{ c }}">{{ c }}</span>{% endfor %}
+      </div>
+      {% endif %}
+      {% endfor %}
+
+      <div class="actions">
+        <button type="button" class="primary" id="preview-btn">Suggest tags →</button>
+        <button type="button" class="primary" id="commit-btn" style="display:none">✓ Save to TagStudio</button>
+        <div class="nav">
+          {% if prev_id %}<a class="navlink" href="/photo/{{ prev_id }}"><button type="button" class="ghost">‹ prev</button></a>{% endif %}
+          {% if next_id %}<a class="navlink" href="/photo/{{ next_id }}"><button type="button" class="ghost">skip ›</button></a>{% endif %}
+        </div>
+      </div>
+      <div class="status" id="status"></div>
+    </form>
+  </section>
+</main>
+
+<script>
+const KEYS = [{% for q in questions %}"{{ q.key }}"{% if not loop.last %},{% endif %}{% endfor %}];
+const CAT = { {% for q in questions %}"{{ q.key }}":"{{ q.category }}"{% if not loop.last %},{% endif %}{% endfor %} };
+// suggestion chips per category (confirmed tags to be written)
+const chips = { People:[], Location:[], Context:[] };
+const nextId = {{ next_id if next_id is not none else 'null' }};
+
+function catForKey(k){ return CAT[k]; }
+function renderChips(cat){
+  const box = document.querySelector(`[data-chips="${cat}"]`);
+  box.innerHTML = "";
+  chips[cat].forEach((tag, i) => {
+    const el = document.createElement("span");
+    el.className = "chip";
+    el.innerHTML = `<b></b><span class="x">×</span>`;
+    el.querySelector("b").textContent = tag;
+    el.querySelector(".x").onclick = () => { chips[cat].splice(i,1); renderChips(cat); showCommit(); };
+    box.appendChild(el);
+  });
+}
+function addChip(cat, val){
+  val = val.trim();
+  if(!val) return;
+  if(!chips[cat].some(t => t.toLowerCase() === val.toLowerCase())) chips[cat].push(val);
+  renderChips(cat);
+  showCommit();
+}
+function anyChips(){ return Object.values(chips).some(a => a.length); }
+function showCommit(){
+  document.getElementById("commit-btn").style.display = anyChips() ? "" : "none";
+}
+
+document.querySelectorAll("[data-add]").forEach(s => {
+  s.onclick = () => addChip(catForKey(s.dataset.add), s.dataset.val);
+});
+
+document.getElementById("preview-btn").onclick = async () => {
+  const status = document.getElementById("status");
+  status.style.color = "var(--muted)"; status.textContent = "thinking…";
+  const fd = new FormData();
+  KEYS.forEach(k => fd.append(k, document.querySelector(`[name="${k}"]`).value));
+  let data;
+  try {
+    const r = await fetch("/preview", { method:"POST", body: fd });
+    data = await r.json();
+  } catch(e){ status.style.color="#ff8a8a"; status.textContent="preview failed: "+e; return; }
+  Object.entries(data.suggestions || {}).forEach(([cat, tags]) => tags.forEach(t => addChip(cat, t)));
+  status.style.color = "var(--accent2)";
+  status.textContent = anyChips()
+    ? `Suggested tags below — edit, then save.${data.llm ? " (via local LLM)" : ""}`
+    : "No tags found in your answers.";
+};
+
+document.getElementById("commit-btn").onclick = async () => {
+  const status = document.getElementById("status");
+  const fd = new FormData();
+  fd.append("entry_id", document.getElementById("interview").dataset.entry);
+  fd.append("people", chips.People.join(","));
+  fd.append("location", chips.Location.join(","));
+  fd.append("context", chips.Context.join(","));
+  status.style.color = "var(--muted)"; status.textContent = "saving…";
+  let data;
+  try {
+    const r = await fetch("/commit", { method:"POST", body: fd });
+    data = await r.json();
+  } catch(e){ status.style.color="#ff8a8a"; status.textContent="save failed: "+e; return; }
+  status.style.color = "var(--accent2)";
+  status.textContent = `✓ Wrote ${data.added.length} tag(s) to TagStudio. ` +
+    (data.next_id ? "Loading next photo…" : "That was the last photo.");
+  if (data.next_id) setTimeout(() => location.href = `/photo/${data.next_id}`, 700);
+};
+
+// Enter in a field = add its raw value as a chip for that category.
+document.querySelectorAll('input[type=text]').forEach(inp => {
+  inp.addEventListener("keydown", e => {
+    if(e.key === "Enter"){ e.preventDefault();
+      inp.value.split(",").forEach(v => addChip(inp.dataset.category, v));
+      inp.value = "";
+    }
+  });
+});
+</script>
+</body>
+</html>

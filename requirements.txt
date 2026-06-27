@@ -1,0 +1,12 @@
+# Core (required)
+fastapi>=0.110
+uvicorn[standard]>=0.27
+jinja2>=3.1
+python-multipart>=0.0.9
+pillow>=10.0
+
+# Optional add-ons (uncomment to enable; see README Roadmap)
+# ollama>=0.1.7          # local LLM for smarter plain-English -> tag parsing & vision
+# insightface>=0.7.3     # face recognition / identity learning
+# onnxruntime>=1.17      #   (insightface backend, CPU is fine)
+# reverse_geocoder>=1.5  # offline EXIF GPS -> place names
