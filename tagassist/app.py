@@ -28,7 +28,7 @@ from io import BytesIO
 
 from PIL import Image
 
-from . import exif, interview, llm
+from . import exif, geocode, interview, llm
 from .config import Config
 from .entities import EntityStore
 from .faces import FaceEngine
@@ -50,6 +50,56 @@ def create_app(config: Config) -> FastAPI:
 
     def open_lib() -> TagStudioLibrary:
         return TagStudioLibrary(config.library).connect()
+
+    def build_geo(meta) -> dict | None:
+        """Reverse-geocode a photo's GPS into clickable location options.
+
+        Returns {label, options} where each option is either a learned entity
+        (``known`` -> click applies its full chain) or a geocoded place name
+        (``unknown`` -> click opens a teach card pre-filled with the geographic
+        path). Children of a matched city (e.g. Phoenix -> Moms House) are
+        surfaced first, since GPS gets you to the city but not the exact spot.
+        """
+        if not meta.has_gps:
+            return None
+        g = geocode.reverse(*meta.gps)
+        if not g:
+            return None
+        city, state, country = g["city"], g["state"], g["country"]
+        label = ", ".join(x for x in (city, state) if x) or "location"
+        options: list[dict] = []
+        seen: set[str] = set()
+
+        def add_known(name: str) -> None:
+            ent = entities.lookup(name)
+            if ent and ent.display.lower() not in seen:
+                seen.add(ent.display.lower())
+                options.append({
+                    "name": ent.display, "status": "known",
+                    "chain": entities.resolve_chain(ent.display),
+                })
+
+        if city and entities.lookup(city):
+            for child in entities.children(city):       # Moms House, My Apartment...
+                if child.display.lower() not in seen:
+                    seen.add(child.display.lower())
+                    options.append({
+                        "name": child.display, "status": "known",
+                        "chain": entities.resolve_chain(child.display),
+                    })
+            add_known(city)
+        elif city:
+            path = " > ".join(p for p in ("Location", country, state) if p)
+            options.append({"name": city, "status": "unknown", "suggested_path": path})
+            seen.add(city.lower())
+
+        if state and state.lower() not in seen:
+            if entities.lookup(state):
+                add_known(state)
+            else:
+                path = " > ".join(p for p in ("Location", country) if p)
+                options.append({"name": state, "status": "unknown", "suggested_path": path})
+        return {"label": label, "options": options}
 
     # -- navigation ------------------------------------------------------
 
@@ -78,6 +128,7 @@ def create_app(config: Config) -> FastAPI:
             all_ids = [e.id for e in lib.entries()]
             existing = entry.tags
             meta = exif.read_meta(entry.abs_path) if entry.abs_path.exists() else exif.PhotoMeta()
+            geo = build_geo(meta)
             people_hint = faces.known_people()
             face_suggestions = [m.name for m in faces.suggest(entry.abs_path)] if entry.abs_path.exists() else []
 
@@ -93,6 +144,7 @@ def create_app(config: Config) -> FastAPI:
                 "questions": interview.QUESTIONS,
                 "existing_tags": existing,
                 "meta": meta,
+                "geo": geo,
                 "people_hint": people_hint,
                 "face_suggestions": face_suggestions,
                 "known_nodes": entities.names(),

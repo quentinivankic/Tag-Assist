@@ -110,6 +110,16 @@ def test_alias_makes_variant_recognized(tmp_path):
     assert store.full_path("camel back mountain")[-1] == "Camelback Mountain"
 
 
+def test_children(tmp_path):
+    store = EntityStore(tmp_path)
+    store.learn("Phoenix", "Location > USA > Arizona")
+    store.learn("Moms House", "Phoenix")
+    store.learn("My Apartment", "Phoenix")
+    assert [e.display for e in store.children("Phoenix")] == ["Moms House", "My Apartment"]
+    assert store.children("Arizona") == [store.lookup("Phoenix")]
+    assert store.children("Nonexistent") == []
+
+
 def test_names_longest_first_for_greedy_match(tmp_path):
     store = EntityStore(tmp_path)
     store.learn("Vivaldi Cafe", ["Location"])

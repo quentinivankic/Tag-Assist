@@ -206,6 +206,15 @@ class EntityStore:
             out.extend(ent.aliases)
         return sorted(set(out), key=lambda s: (-len(s), s.lower()))
 
+    def children(self, name: str) -> list[Entity]:
+        """Direct children of an entity (those whose parent is ``name``)."""
+        ent = self.lookup(name)
+        if ent is None:
+            return []
+        target = ent.display.lower()
+        kids = [e for e in self._data.values() if (e.parent or "").lower() == target]
+        return sorted(kids, key=lambda e: e.display.lower())
+
     def all(self) -> list[Entity]:
         return [self._data[k] for k in sorted(self._data)]
 

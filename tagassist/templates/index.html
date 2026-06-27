@@ -51,6 +51,16 @@
   .teach .q b { color:var(--warn); }
   .teach .row { display:flex; gap:8px; }
   .teach input { flex:1; }
+  .geo { background:#1b2330; border:1px solid var(--line); border-radius:10px;
+         padding:10px 12px; margin-bottom:14px; }
+  .geo .head { font-size:13px; color:var(--muted); margin-bottom:6px; }
+  .geo .head b { color:var(--accent); }
+  .geo .opts { display:flex; flex-wrap:wrap; gap:6px; }
+  .geo .opt { cursor:pointer; border:1px solid var(--line); border-radius:999px;
+              padding:4px 11px; font-size:13px; background:#222b3a; color:var(--text); }
+  .geo .opt:hover { border-color:var(--accent); }
+  .geo .opt.known { border-color:var(--accent2); }
+  .geo .opt .k { color:var(--muted); font-size:11px; margin-left:4px; }
   .reuse { margin-top:6px; }
   .reuse span { cursor:pointer; color:var(--accent); font-size:13px; margin-right:10px; }
   .reuse span:hover { text-decoration:underline; }
@@ -83,7 +93,8 @@
          onerror="this.style.display='none';this.insertAdjacentHTML('afterend','<p style=color:#9aa0ab>Image file not found on disk.</p>')">
     <div class="meta">
       {% if meta.year %}<span>📅 {{ meta.year }}</span>{% endif %}
-      {% if meta.has_gps %}<span>📍 GPS {{ "%.4f"|format(meta.gps[0]) }}, {{ "%.4f"|format(meta.gps[1]) }}</span>{% endif %}
+      {% if geo %}<span>📍 {{ geo.label }}</span>
+      {% elif meta.has_gps %}<span>📍 {{ "%.4f"|format(meta.gps[0]) }}, {{ "%.4f"|format(meta.gps[1]) }}</span>{% endif %}
       {% if not meta.year and not meta.has_gps %}<span>no EXIF date/GPS</span>{% endif %}
     </div>
     {% if existing_tags %}
@@ -97,6 +108,7 @@
   </section>
 
   <section class="panel">
+    <div id="geo-area"></div>
     <form id="interview" data-entry="{{ entry.id }}" onsubmit="return false">
       {% for q in questions %}
       <label>{{ q.prompt }} <span class="hint">— {{ q.hint }}</span></label>
@@ -139,6 +151,8 @@
 <script>
 const KEYS = [{% for q in questions %}"{{ q.key }}"{% if not loop.last %},{% endif %}{% endfor %}];
 const nextId = {{ next_id if next_id is not none else 'null' }};
+const YEAR = {{ meta.year if meta.year else 'null' }};
+const GEO = {{ geo | tojson }};
 
 // Confirmed entities to write: [{name, chain:[...]}]
 let confirmed = [];
@@ -290,6 +304,38 @@ document.getElementById("preview-btn").onclick = async () => {
     ? `Tell me what the new ${unknowns === 1 ? "name is" : "names are"} — known ones are already added below.`
     : `All recognized — review below and save.${data.llm ? " (via local LLM)" : ""}`);
 };
+
+// Render the "from GPS" quick-pick chips. Known places (incl. children of the
+// geocoded city, e.g. Phoenix -> Moms House) apply on click; new place names
+// open a teach card pre-filled with the geographic path.
+function renderGeo(){
+  const area = document.getElementById("geo-area");
+  if(!GEO){ return; }
+  area.innerHTML = `<div class="geo"><div class="head">📍 GPS looks like <b>${GEO.label}</b> — pick the spot:</div><div class="opts"></div></div>`;
+  const box = area.querySelector(".opts");
+  const opts = GEO.options || [];
+  if(!opts.length){
+    box.innerHTML = `<span style="color:var(--muted);font-size:13px">${GEO.label} — no learned places here yet; type one below</span>`;
+    return;
+  }
+  opts.forEach(o => {
+    const el = document.createElement("span");
+    el.className = "opt" + (o.status === "known" ? " known" : "");
+    el.innerHTML = o.name + (o.status === "known" ? "" : '<span class="k">new</span>');
+    el.title = o.status === "known"
+      ? "⊂ " + (o.chain || []).slice().reverse().join(" ⊂ ")
+      : "teach as " + (o.suggested_path || "");
+    el.onclick = () => {
+      if(o.status === "known"){ addConfirmed(o.name, o.chain); }
+      else { document.getElementById("teach-area").appendChild(teachCard(o.name, o.suggested_path, null)); }
+    };
+    box.appendChild(el);
+  });
+}
+
+// On load: auto-fill the capture year as a tag, and show GPS suggestions.
+if(YEAR){ addConfirmed(String(YEAR), []); }
+renderGeo();
 
 document.getElementById("commit-btn").onclick = async () => {
   setStatus("saving…");

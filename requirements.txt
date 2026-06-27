@@ -5,6 +5,7 @@ jinja2>=3.1
 python-multipart>=0.0.9
 pillow>=10.0
 pillow-heif>=0.16    # lets Pillow read/convert HEIC/HEIF (iPhone photos)
+reverse_geocode>=1.6   # offline GPS -> city name (bundled data, no network/API)
 
 # Optional add-ons (uncomment to enable; see README Roadmap)
 # ollama>=0.1.7          # local LLM for smarter plain-English -> tag parsing & vision
