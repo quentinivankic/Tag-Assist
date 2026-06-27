@@ -2,17 +2,17 @@
 
 The goal: label a face once ("this is Alice") and have Tag-Assist auto-suggest
 Alice on future photos. That needs face embeddings (``insightface`` /
-``face_recognition``), which are heavyweight optional deps. v1 ships the
-*interface* and a learned-name store so the rest of the app can integrate
-cleanly; the embedding backend is loaded only if installed.
+``face_recognition``), which are heavyweight optional deps. This ships the
+*interface* so the rest of the app can integrate cleanly; the embedding backend
+is loaded only if installed.
 
 If no backend is available, ``FaceEngine.available`` is False and the app simply
-skips face suggestions — everything else works unchanged.
+skips face suggestions — everything else works unchanged. (The list of people
+you've tagged before is read from TagStudio's database, not from here.)
 """
 
 from __future__ import annotations
 
-import json
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -34,12 +34,9 @@ class FaceEngine:
     it later is a drop-in change.
     """
 
-    def __init__(self, library_root: str | Path, entities=None):
-        from .entities import EntityStore
-
+    def __init__(self, library_root: str | Path):
         self.cache_dir = Path(library_root) / CACHE_DIRNAME
         self.cache_dir.mkdir(parents=True, exist_ok=True)
-        self._entities = entities if entities is not None else EntityStore(library_root)
         self._backend = self._detect_backend()
 
     @staticmethod
@@ -59,25 +56,6 @@ class FaceEngine:
     def backend(self) -> str:
         return self._backend
 
-    # -- learned-names store (works regardless of backend) ---------------
-
-    def known_people(self) -> list[str]:
-        """Display names of learned entities that are people (chain top == People)."""
-        people = [
-            e.display
-            for e in self._entities.all()
-            if (chain := self._entities.resolve_chain(e.display)) and chain[0] == "People"
-        ]
-        return sorted(people)
-
-    def remember_person(self, name: str) -> None:
-        """Record a person for quick reuse, without clobbering a richer chain."""
-        name = name.strip()
-        if not name:
-            return
-        if self._entities.lookup(name) is None:
-            self._entities.learn(name, ["People"])
-
     # -- recognition (no-op until a backend is enabled) ------------------
 
     def suggest(self, image_path: str | Path) -> list[FaceMatch]:
@@ -89,7 +67,6 @@ class FaceEngine:
 
     def learn(self, image_path: str | Path, name: str) -> None:
         """Associate the face(s) in this photo with a name."""
-        self.remember_person(name)
         if not self.available:
             return
         # Backend implementation goes here (store embedding -> name).

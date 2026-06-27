@@ -1,3 +1,4 @@
+import json
 import subprocess
 import sys
 from pathlib import Path
@@ -92,6 +93,76 @@ def test_apply_entity_empty_chain(sample_lib):
         entry = lib.entries(limit=1)[0]
         assert lib.apply_entity(entry.id, "sunset", []) is True
         assert lib.tags_for_entry(entry.id) == ["sunset"]
+
+
+def test_learn_and_resolve_chain_from_db(sample_lib):
+    with TagStudioLibrary(sample_lib) as lib:
+        lib.learn("Phoenix", "Location > USA > Arizona")
+        lib.learn("Moms House", "Phoenix")  # inherits Phoenix's ancestry
+        assert lib.full_path("Moms House") == [
+            "Location", "USA", "Arizona", "Phoenix", "Moms House",
+        ]
+        assert lib.resolve_chain("Phoenix") == ["Location", "USA", "Arizona"]
+        assert lib.children("Phoenix") == ["Moms House"]
+        assert lib.canonical_name("phoenix") == "Phoenix"  # case-insensitive
+
+
+def test_resolve_chain_heals_multi_parent(sample_lib):
+    # A stray direct USA->Phoenix link (from an earlier bug) must not shorten
+    # the chain; resolve_chain picks the deepest parent (Arizona).
+    with TagStudioLibrary(sample_lib) as lib:
+        lib.learn("Phoenix", "Location > USA > Arizona")
+        usa, phx = lib.find_tag("USA"), lib.find_tag("Phoenix")
+        lib._link_parent(usa, phx)  # inject the stray link
+        lib.conn.commit()
+        assert {n for _, n in lib._parents(phx)} == {"Arizona", "USA"}
+        assert lib.resolve_chain("Phoenix") == ["Location", "USA", "Arizona"]
+
+
+def test_collapse_descendants_from_db(sample_lib):
+    with TagStudioLibrary(sample_lib) as lib:
+        lib.learn("Phoenix", "Location > USA > Arizona")
+        lib.learn("Moms House", "Phoenix")
+        assert lib.collapse_descendants(["Phoenix", "Moms House"]) == ["Moms House"]
+        assert lib.is_ancestor("Phoenix", "Moms House") is True
+        assert lib.is_ancestor("Moms House", "Phoenix") is False
+
+
+def test_suggest_match_from_db(sample_lib):
+    with TagStudioLibrary(sample_lib) as lib:
+        lib.learn("Camelback Mountain", "Location > USA > Arizona")
+        assert lib.suggest_match("camel back mountain") == "Camelback Mountain"
+        assert lib.suggest_match("camelbak mountain") == "Camelback Mountain"
+        assert lib.suggest_match("Denmark") is None
+
+
+def test_alias_recognized_from_db(sample_lib):
+    with TagStudioLibrary(sample_lib) as lib:
+        lib.learn("Camelback Mountain", "Location > USA > Arizona")
+        assert lib.add_alias_by_name("Camelback Mountain", "camel back mountain") is True
+        assert lib.canonical_name("camel back mountain") == "Camelback Mountain"
+
+
+def test_import_legacy_entities(sample_lib):
+    cache = Path(sample_lib) / ".tagassist_cache"
+    cache.mkdir(parents=True, exist_ok=True)
+    (cache / "entities.json").write_text(json.dumps({
+        "phoenix": {"display": "Phoenix", "parent": "Arizona", "aliases": []},
+        "arizona": {"display": "Arizona", "parent": "USA", "aliases": []},
+        "usa": {"display": "USA", "parent": "Location", "aliases": []},
+        "location": {"display": "Location", "parent": None, "aliases": []},
+        "moms house": {"display": "Moms House", "parent": "Phoenix", "aliases": ["moms"]},
+    }))
+    with TagStudioLibrary(sample_lib) as lib:
+        assert lib.import_legacy_entities() == 5
+        assert lib.full_path("Moms House") == [
+            "Location", "USA", "Arizona", "Phoenix", "Moms House",
+        ]
+        assert lib.canonical_name("moms") == "Moms House"  # alias imported
+        # second run is a no-op (file already marked imported)
+        assert lib.import_legacy_entities() == 0
+    assert not (cache / "entities.json").exists()
+    assert (cache / "entities.json.imported").exists()
 
 
 def test_missing_library_raises(tmp_path):

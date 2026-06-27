@@ -7,10 +7,16 @@ Flow:
                            (LLM if available, else rule-based) without writing.
 4.  ``POST /commit``     - write confirmed tags into the TagStudio library.
 5.  ``GET /image/{id}``  - serve the photo bytes.
+
+The tag hierarchy is read and written through TagStudio's own database
+(``tags`` / ``tag_parents`` / ``tag_aliases``) — that database is the single
+source of truth, so the app and TagStudio can never drift out of sync.
 """
 
 from __future__ import annotations
 
+import json
+from io import BytesIO
 from pathlib import Path
 
 from fastapi import FastAPI, Form, HTTPException, Request
@@ -22,15 +28,10 @@ from fastapi.responses import (
     Response,
 )
 from fastapi.templating import Jinja2Templates
-
-import json
-from io import BytesIO
-
 from PIL import Image
 
 from . import exif, geocode, interview, llm
 from .config import Config
-from .entities import EntityStore
 from .faces import FaceEngine
 from .tagstudio import TagStudioLibrary
 
@@ -45,20 +46,29 @@ _BOX_CATEGORY = {"people": "People", "location": "Location", "context": "Context
 
 def create_app(config: Config) -> FastAPI:
     app = FastAPI(title="Tag-Assist")
-    entities = EntityStore(config.library)
-    faces = FaceEngine(config.library, entities)
+    faces = FaceEngine(config.library)
 
     def open_lib() -> TagStudioLibrary:
         return TagStudioLibrary(config.library).connect()
 
-    def build_geo(meta) -> dict | None:
+    # One-time: fold any legacy entities.json knowledge file into the DB, so
+    # TagStudio's database becomes the sole source of truth from here on.
+    try:
+        with open_lib() as _lib:
+            migrated = _lib.import_legacy_entities()
+            if migrated:
+                print(f"[Tag-Assist] migrated {migrated} legacy entities into the library DB")
+    except Exception as exc:  # pragma: no cover - best effort
+        print(f"[Tag-Assist] legacy migration skipped: {exc}")
+
+    def build_geo(lib: TagStudioLibrary, meta) -> dict | None:
         """Reverse-geocode a photo's GPS into clickable location options.
 
-        Returns {label, options} where each option is either a learned entity
-        (``known`` -> click applies its full chain) or a geocoded place name
-        (``unknown`` -> click opens a teach card pre-filled with the geographic
-        path). Children of a matched city (e.g. Phoenix -> Moms House) are
-        surfaced first, since GPS gets you to the city but not the exact spot.
+        Each option is either ``known`` (an existing tag -> click applies its
+        full chain) or ``unknown`` (a geocoded place name -> click opens a teach
+        card pre-filled with the geographic path). Children of a matched city
+        (e.g. Phoenix -> Moms House) come first, since GPS gets you to the city
+        but only you know the exact spot.
         """
         if not meta.has_gps:
             return None
@@ -71,21 +81,19 @@ def create_app(config: Config) -> FastAPI:
         seen: set[str] = set()
 
         def add_known(name: str) -> None:
-            ent = entities.lookup(name)
-            if ent and ent.display.lower() not in seen:
-                seen.add(ent.display.lower())
+            disp = lib.canonical_name(name)
+            if disp and disp.lower() not in seen:
+                seen.add(disp.lower())
                 options.append({
-                    "name": ent.display, "status": "known",
-                    "chain": entities.resolve_chain(ent.display),
+                    "name": disp, "status": "known", "chain": lib.resolve_chain(disp),
                 })
 
-        if city and entities.lookup(city):
-            for child in entities.children(city):       # Moms House, My Apartment...
-                if child.display.lower() not in seen:
-                    seen.add(child.display.lower())
+        if city and lib.is_known(city):
+            for child in lib.children(city):        # Moms House, My Apartment...
+                if child.lower() not in seen:
+                    seen.add(child.lower())
                     options.append({
-                        "name": child.display, "status": "known",
-                        "chain": entities.resolve_chain(child.display),
+                        "name": child, "status": "known", "chain": lib.resolve_chain(child),
                     })
             add_known(city)
         elif city:
@@ -94,7 +102,7 @@ def create_app(config: Config) -> FastAPI:
             seen.add(city.lower())
 
         if state and state.lower() not in seen:
-            if entities.lookup(state):
+            if lib.is_known(state):
                 add_known(state)
             else:
                 path = " > ".join(p for p in ("Location", country) if p)
@@ -105,7 +113,6 @@ def create_app(config: Config) -> FastAPI:
 
     def _next_untagged_id(lib: TagStudioLibrary) -> int | None:
         for entry in lib.entries():
-            # "Untagged" = has no People/Location/Context tag yet.
             if not entry.tags:
                 return entry.id
         first = lib.entries(limit=1)
@@ -128,9 +135,10 @@ def create_app(config: Config) -> FastAPI:
             all_ids = [e.id for e in lib.entries()]
             existing = entry.tags
             meta = exif.read_meta(entry.abs_path) if entry.abs_path.exists() else exif.PhotoMeta()
-            geo = build_geo(meta)
-            people_hint = faces.known_people()
+            geo = build_geo(lib, meta)
+            people_hint = lib.tags_under_category("People")
             face_suggestions = [m.name for m in faces.suggest(entry.abs_path)] if entry.abs_path.exists() else []
+            known_nodes = lib.known_names()
 
         idx = all_ids.index(entry_id) if entry_id in all_ids else 0
         prev_id = all_ids[idx - 1] if idx > 0 else None
@@ -147,7 +155,7 @@ def create_app(config: Config) -> FastAPI:
                 "geo": geo,
                 "people_hint": people_hint,
                 "face_suggestions": face_suggestions,
-                "known_nodes": entities.names(),
+                "known_nodes": known_nodes,
                 "position": idx + 1,
                 "total": len(all_ids),
                 "prev_id": prev_id,
@@ -164,7 +172,6 @@ def create_app(config: Config) -> FastAPI:
             if entry is None or not entry.abs_path.exists():
                 raise HTTPException(404, "Image not found")
             path = entry.abs_path
-        # Browsers render these directly; serve untouched.
         if path.suffix.lower() in _WEB_SAFE:
             return FileResponse(path)
         # HEIC/HEIF/TIFF/etc. -> convert to JPEG on the fly for display.
@@ -181,85 +188,66 @@ def create_app(config: Config) -> FastAPI:
     # -- parse & write ---------------------------------------------------
 
     @app.post("/preview")
-    def preview(
-        people: str = Form(""),
-        location: str = Form(""),
-        context: str = Form(""),
-    ):
+    def preview(people: str = Form(""), location: str = Form(""), context: str = Form("")):
         """Parse answers into entity items (no DB writes).
 
-        Each item is either ``known`` (already learned -> its full nested chain
-        is returned for silent auto-apply) or ``unknown`` (needs a one-time
-        "what is this?" answer, pre-suggesting the box's category as the top).
+        Each item is ``known`` (an existing tag -> full chain returned for silent
+        auto-apply) or ``unknown`` (needs a one-time "what is this?" answer, with
+        a fuzzy "did you mean?" suggestion when a near spelling match exists).
         """
-        known_names = entities.names()
-        known_found: list[str] = []          # display names of recognized entities
-        unknown_found: list[tuple[str, str]] = []  # (name, suggested category)
-        seen: set[str] = set()
-        for box, answer in (("people", people), ("location", location), ("context", context)):
-            category = _BOX_CATEGORY[box]
-            for name in llm.parse_answer(answer, category, known_names):
-                ent = entities.lookup(name)
-                key = (ent.display if ent else name).lower()
-                if key in seen:
-                    continue
-                seen.add(key)
-                if ent:
-                    known_found.append(ent.display)
-                else:
-                    unknown_found.append((name, category))
+        with open_lib() as lib:
+            known_names = lib.known_names()
+            known_found: list[str] = []
+            unknown_found: list[tuple[str, str]] = []
+            seen: set[str] = set()
+            for box, answer in (("people", people), ("location", location), ("context", context)):
+                category = _BOX_CATEGORY[box]
+                for name in llm.parse_answer(answer, category, known_names):
+                    disp = lib.canonical_name(name)
+                    key = (disp or name).lower()
+                    if key in seen:
+                        continue
+                    seen.add(key)
+                    if disp:
+                        known_found.append(disp)
+                    else:
+                        unknown_found.append((name, category))
 
-        # Collapse overlaps: keep only the deepest mentioned entity in a chain.
-        items: list[dict] = []
-        for name in entities.collapse_descendants(known_found):
-            items.append({
-                "name": name,
-                "status": "known",
-                "chain": entities.resolve_chain(name),
-            })
-        for name, category in unknown_found:
-            items.append({
-                "name": name,
-                "status": "unknown",
-                "suggested": category,
-                "did_you_mean": entities.suggest_match(name),
-            })
+            items: list[dict] = []
+            for name in lib.collapse_descendants(known_found):
+                items.append({"name": name, "status": "known", "chain": lib.resolve_chain(name)})
+            for name, category in unknown_found:
+                items.append({
+                    "name": name, "status": "unknown",
+                    "suggested": category, "did_you_mean": lib.suggest_match(name),
+                })
         return JSONResponse({"items": items, "llm": llm.available()})
 
     @app.post("/learn")
     def learn(name: str = Form(...), chain: str = Form("")):
-        """Teach the app what an entity is (path like 'Pets > Dog'). Remembered.
-
-        Returns the taught entity AND every node in its full path (each with its
-        own resolved chain), so the UI can auto-resolve any still-pending
-        "what is this?" cards that just became known (e.g. teaching a deep place
-        path makes the leftover 'Phoenix' card disappear).
-        """
-        ent = entities.learn(name, chain)
-        resolved = [
-            {"name": node, "chain": entities.resolve_chain(node)}
-            for node in entities.full_path(ent.display)
-        ]
-        return JSONResponse({
-            "name": ent.display,
-            "chain": entities.resolve_chain(ent.display),
-            "resolved": resolved,
-        })
+        """Teach what an entity is (path like 'Pets > Dog') by creating the
+        nested tags in the DB. Returns the entity AND every node in its full
+        path so the UI can auto-resolve still-pending "what is this?" cards."""
+        with open_lib() as lib:
+            leaf = lib.learn(name, chain)
+            resolved = [
+                {"name": node, "chain": lib.resolve_chain(node)}
+                for node in lib.full_path(leaf)
+            ]
+            out = {"name": leaf, "chain": lib.resolve_chain(leaf), "resolved": resolved}
+        return JSONResponse(out)
 
     @app.post("/alias")
     def alias(name: str = Form(...), target: str = Form(...)):
-        """Record that a typed spelling (``name``) is the same as an existing
-        entity (``target``), so that spelling is recognized instantly next time.
-        Returns the target's canonical name + resolved chain to apply now.
-        """
-        ent = entities.lookup(target)
-        if ent is None:
-            raise HTTPException(404, "Unknown target entity")
-        entities.add_alias(target, name)
-        return JSONResponse({
-            "name": ent.display,
-            "chain": entities.resolve_chain(ent.display),
-        })
+        """Record a typed spelling (``name``) as an alias of existing tag
+        ``target``, so it's recognized instantly next time."""
+        with open_lib() as lib:
+            disp = lib.canonical_name(target)
+            if disp is None:
+                raise HTTPException(404, "Unknown target entity")
+            lib.add_alias_by_name(target, name)
+            out = {"name": disp, "chain": lib.resolve_chain(disp)}
+        return JSONResponse(out)
 
     @app.post("/commit")
     def commit(entry_id: int = Form(...), entities_json: str = Form("[]")):
@@ -268,14 +256,16 @@ def create_app(config: Config) -> FastAPI:
             payload = json.loads(entities_json)
         except ValueError:
             raise HTTPException(400, "Bad entities payload")
-        # Defensively collapse ancestors the client may have sent.
-        by_name = {(it.get("name") or "").strip(): it for it in payload if (it.get("name") or "").strip()}
-        keep = {n.lower() for n in entities.collapse_descendants(list(by_name))}
+        by_name = {
+            (it.get("name") or "").strip(): it
+            for it in payload if (it.get("name") or "").strip()
+        }
         added: list[str] = []
         with open_lib() as lib:
             entry = lib.get_entry(entry_id)
             if entry is None:
                 raise HTTPException(404, "Entry not found")
+            keep = {n.lower() for n in lib.collapse_descendants(list(by_name))}
             for name, item in by_name.items():
                 if name.lower() not in keep:
                     continue
