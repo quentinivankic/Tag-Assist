@@ -17,6 +17,16 @@ try:
 except Exception:  # pragma: no cover - Pillow is a core dep, but be safe
     _PIL_OK = False
 
+# Register the HEIF/HEIC opener so Pillow can read iPhone photos (both for EXIF
+# here and for on-the-fly conversion in the web app). Optional: if pillow-heif
+# isn't installed, HEIC simply won't be readable, but nothing else breaks.
+try:
+    from pillow_heif import register_heif_opener
+    register_heif_opener()
+    _HEIF_OK = True
+except Exception:
+    _HEIF_OK = False
+
 _GPS_IFD = 0x8825  # ExifTags.IFD.GPSInfo
 
 

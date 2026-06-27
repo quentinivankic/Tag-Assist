@@ -4,6 +4,7 @@ uvicorn[standard]>=0.27
 jinja2>=3.1
 python-multipart>=0.0.9
 pillow>=10.0
+pillow-heif>=0.16    # lets Pillow read/convert HEIC/HEIF (iPhone photos)
 
 # Optional add-ons (uncomment to enable; see README Roadmap)
 # ollama>=0.1.7          # local LLM for smarter plain-English -> tag parsing & vision

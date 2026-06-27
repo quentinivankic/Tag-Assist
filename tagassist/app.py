@@ -14,10 +14,19 @@ from __future__ import annotations
 from pathlib import Path
 
 from fastapi import FastAPI, Form, HTTPException, Request
-from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse
+from fastapi.responses import (
+    FileResponse,
+    HTMLResponse,
+    JSONResponse,
+    RedirectResponse,
+    Response,
+)
 from fastapi.templating import Jinja2Templates
 
 import json
+from io import BytesIO
+
+from PIL import Image
 
 from . import exif, interview, llm
 from .config import Config
@@ -26,6 +35,9 @@ from .faces import FaceEngine
 from .tagstudio import TagStudioLibrary
 
 _TEMPLATES = Jinja2Templates(directory=str(Path(__file__).parent / "templates"))
+
+# Suffixes browsers display natively; everything else is converted to JPEG.
+_WEB_SAFE = {".jpg", ".jpeg", ".png", ".gif", ".webp", ".bmp", ".svg"}
 
 # Which top-level category each interview box suggests for *new* entities.
 _BOX_CATEGORY = {"people": "People", "location": "Location", "context": "Context"}
@@ -99,7 +111,20 @@ def create_app(config: Config) -> FastAPI:
             entry = lib.get_entry(entry_id)
             if entry is None or not entry.abs_path.exists():
                 raise HTTPException(404, "Image not found")
-            return FileResponse(entry.abs_path)
+            path = entry.abs_path
+        # Browsers render these directly; serve untouched.
+        if path.suffix.lower() in _WEB_SAFE:
+            return FileResponse(path)
+        # HEIC/HEIF/TIFF/etc. -> convert to JPEG on the fly for display.
+        try:
+            with Image.open(path) as img:
+                img = img.convert("RGB")
+                img.thumbnail((1600, 1600))  # cap size; iPhone HEIC are huge
+                buf = BytesIO()
+                img.save(buf, "JPEG", quality=85)
+            return Response(content=buf.getvalue(), media_type="image/jpeg")
+        except Exception:
+            return FileResponse(path)  # last resort: let the browser try
 
     # -- parse & write ---------------------------------------------------
 
