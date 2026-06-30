@@ -226,6 +226,31 @@ def create_app(config: Config) -> FastAPI:
             request, "tags.html", {"tree": tree, "count": count}
         )
 
+    @app.post("/tag/rename")
+    def tag_rename(tag_id: int = Form(...), name: str = Form(...)):
+        with open_lib() as lib:
+            try:
+                lib.rename_tag(tag_id, name)
+            except ValueError as e:
+                raise HTTPException(400, str(e))
+        return JSONResponse({"ok": True})
+
+    @app.post("/tag/reparent")
+    def tag_reparent(tag_id: int = Form(...), parent_id: str = Form("")):
+        pid = int(parent_id) if parent_id.strip() else None  # blank = make root
+        with open_lib() as lib:
+            try:
+                lib.set_parent(tag_id, pid)
+            except ValueError as e:
+                raise HTTPException(400, str(e))
+        return JSONResponse({"ok": True})
+
+    @app.post("/tag/delete")
+    def tag_delete(tag_id: int = Form(...)):
+        with open_lib() as lib:
+            lib.delete_tag(tag_id)
+        return JSONResponse({"ok": True})
+
     # -- parse & write ---------------------------------------------------
 
     @app.post("/preview")

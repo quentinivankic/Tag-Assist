@@ -6,7 +6,7 @@
 <title>Tag-Assist — all tags</title>
 <style>
   :root { --bg:#15171c; --panel:#1f2229; --line:#30343d; --accent:#6aa9ff;
-          --accent2:#7ee0a0; --text:#e6e8ec; --muted:#9aa0ab; }
+          --accent2:#7ee0a0; --warn:#ffce6a; --text:#e6e8ec; --muted:#9aa0ab; }
   * { box-sizing:border-box; }
   body { margin:0; font:15px/1.6 system-ui,Segoe UI,Roboto,sans-serif;
          background:var(--bg); color:var(--text); }
@@ -17,18 +17,32 @@
   header a { margin-left:auto; color:var(--accent); text-decoration:none;
              border:1px solid var(--line); padding:4px 10px; border-radius:999px; font-size:13px; }
   main { max-width:900px; margin:22px auto; padding:0 18px; }
+  .hint { color:var(--muted); font-size:13px; margin-bottom:12px; }
   #filter { width:100%; padding:10px 12px; border-radius:8px; border:1px solid var(--line);
-            background:#161922; color:var(--text); font-size:15px; margin-bottom:18px; }
+            background:#161922; color:var(--text); font-size:15px; margin-bottom:14px; }
   #filter:focus { outline:none; border-color:var(--accent); }
+  #rootzone { border:1px dashed var(--line); border-radius:8px; padding:10px 12px;
+              color:var(--muted); font-size:13px; margin-bottom:16px; text-align:center; }
+  #rootzone.over { border-color:var(--accent2); color:var(--accent2); background:#1b2330; }
   ul { list-style:none; margin:0; padding-left:18px; border-left:1px solid var(--line); }
   ul.root { padding-left:0; border-left:none; }
-  li { margin:2px 0; }
+  li { margin:3px 0; }
+  .row { display:inline-flex; align-items:center; gap:6px; }
   .tag { display:inline-block; padding:3px 9px; border-radius:8px; background:#202634;
-         border:1px solid var(--line); }
+         border:1px solid var(--line); cursor:grab; user-select:none; }
   .tag.cat { color:var(--accent); font-weight:600; }
-  .tag.leaf { color:var(--text); }
-  .count { color:var(--muted); font-size:12px; margin-left:6px; }
+  .tag.over { border-color:var(--accent2); background:#23303a; }
+  .tag.dragging { opacity:.4; }
+  .count { color:var(--muted); font-size:12px; }
+  .del { cursor:pointer; color:var(--muted); font-weight:700; padding:0 4px; visibility:hidden; }
+  .row:hover .del { visibility:visible; }
+  .del:hover { color:#ff8a8a; }
+  .ren { padding:3px 8px; border-radius:8px; border:1px solid var(--accent);
+         background:#161922; color:var(--text); font-size:15px; }
   .empty { color:var(--muted); }
+  #msg { position:fixed; bottom:16px; left:50%; transform:translateX(-50%);
+         background:#23262f; border:1px solid var(--line); border-radius:8px;
+         padding:8px 14px; font-size:14px; display:none; }
 </style>
 </head>
 <body>
@@ -38,13 +52,19 @@
   <a href="/">← back to tagging</a>
 </header>
 <main>
+  <div class="hint">Double-click to rename · drag a tag onto another to nest it · drag to the bar below to make it top-level · × to delete. Changes apply to every photo automatically.</div>
   <input id="filter" type="text" placeholder="filter tags… (type any name)" autocomplete="off">
+  <div id="rootzone">⬆ drop a tag here to pull it out to the top level</div>
+
   {% macro node(n) %}
     <li data-name="{{ n.name|lower }}">
-      <span class="tag {{ 'cat' if n.children else 'leaf' }}">{{ n.name }}</span>
-      {% if n.children %}<span class="count">{{ n.children|length }}</span>
-        <ul>{% for c in n.children %}{{ node(c) }}{% endfor %}</ul>
-      {% endif %}
+      <span class="row">
+        <span class="tag {{ 'cat' if n.children else 'leaf' }}" draggable="true"
+              data-id="{{ n.id }}" data-name="{{ n.name }}">{{ n.name }}</span>
+        {% if n.children %}<span class="count">{{ n.children|length }}</span>{% endif %}
+        <span class="del" data-id="{{ n.id }}" data-name="{{ n.name }}" title="delete">×</span>
+      </span>
+      {% if n.children %}<ul>{% for c in n.children %}{{ node(c) }}{% endfor %}</ul>{% endif %}
     </li>
   {% endmacro %}
   {% if tree %}
@@ -53,8 +73,87 @@
     <p class="empty">No tags yet — go tag some photos.</p>
   {% endif %}
 </main>
+<div id="msg"></div>
 <script>
-// Live filter: show a tag (and its ancestors) when its name matches.
+function msg(text, err){
+  const m = document.getElementById("msg");
+  m.textContent = text; m.style.display = "block";
+  m.style.borderColor = err ? "#ff8a8a" : "var(--line)";
+  clearTimeout(m._t); m._t = setTimeout(() => m.style.display = "none", err ? 4000 : 1500);
+}
+async function post(url, obj){
+  const fd = new FormData();
+  Object.entries(obj).forEach(([k, v]) => fd.append(k, v));
+  const r = await fetch(url, { method:"POST", body: fd });
+  if(!r.ok){ const t = await r.json().catch(() => ({})); throw new Error(t.detail || ("HTTP " + r.status)); }
+  return r.json();
+}
+
+let draggedId = null;
+
+document.querySelectorAll(".tag").forEach(tag => {
+  tag.addEventListener("dragstart", e => {
+    draggedId = tag.dataset.id;
+    tag.classList.add("dragging");
+    e.dataTransfer.effectAllowed = "move";
+  });
+  tag.addEventListener("dragend", () => tag.classList.remove("dragging"));
+  tag.addEventListener("dragover", e => { e.preventDefault(); tag.classList.add("over"); });
+  tag.addEventListener("dragleave", () => tag.classList.remove("over"));
+  tag.addEventListener("drop", async e => {
+    e.preventDefault(); tag.classList.remove("over");
+    const targetId = tag.dataset.id;
+    if(!draggedId || draggedId === targetId) return;
+    try {
+      await post("/tag/reparent", { tag_id: draggedId, parent_id: targetId });
+      msg("Moved."); location.reload();
+    } catch(err){ msg(err.message, true); }
+  });
+
+  // double-click to rename
+  tag.addEventListener("dblclick", () => {
+    const id = tag.dataset.id, old = tag.dataset.name;
+    const input = document.createElement("input");
+    input.className = "ren"; input.value = old;
+    tag.replaceWith(input); input.focus(); input.select();
+    let done = false;
+    const finish = async (save) => {
+      if(done) return; done = true;
+      if(save && input.value.trim() && input.value.trim() !== old){
+        try { await post("/tag/rename", { tag_id: id, name: input.value.trim() }); location.reload(); return; }
+        catch(err){ msg(err.message, true); }
+      }
+      location.reload();  // revert to fresh render
+    };
+    input.addEventListener("keydown", e => {
+      if(e.key === "Enter") finish(true);
+      else if(e.key === "Escape") finish(false);
+    });
+    input.addEventListener("blur", () => finish(true));
+  });
+});
+
+// delete
+document.querySelectorAll(".del").forEach(d => {
+  d.addEventListener("click", async () => {
+    if(!confirm(`Delete "${d.dataset.name}"? Its children move up to its parent, and photos lose this tag.`)) return;
+    try { await post("/tag/delete", { tag_id: d.dataset.id }); msg("Deleted."); location.reload(); }
+    catch(err){ msg(err.message, true); }
+  });
+});
+
+// drop on the root zone -> make top-level
+const rz = document.getElementById("rootzone");
+rz.addEventListener("dragover", e => { e.preventDefault(); rz.classList.add("over"); });
+rz.addEventListener("dragleave", () => rz.classList.remove("over"));
+rz.addEventListener("drop", async e => {
+  e.preventDefault(); rz.classList.remove("over");
+  if(!draggedId) return;
+  try { await post("/tag/reparent", { tag_id: draggedId, parent_id: "" }); msg("Now top-level."); location.reload(); }
+  catch(err){ msg(err.message, true); }
+});
+
+// live filter
 const filter = document.getElementById("filter");
 filter.addEventListener("input", () => {
   const q = filter.value.trim().toLowerCase();

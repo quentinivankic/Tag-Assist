@@ -550,15 +550,72 @@ class TagStudioLibrary:
         def build(tid: int, seen: frozenset[int]) -> dict:
             name = id2name.get(tid, "?")
             if tid in seen:
-                return {"name": name, "children": []}
+                return {"id": tid, "name": name, "children": []}
             seen = seen | {tid}
             kids = sorted(
                 children_map.get(tid, []), key=lambda i: id2name.get(i, "").lower()
             )
-            return {"name": name, "children": [build(k, seen) for k in kids]}
+            return {"id": tid, "name": name, "children": [build(k, seen) for k in kids]}
 
         roots = [i for i in id2name if i not in has_parent]
         return [build(r, frozenset()) for r in sorted(roots, key=lambda i: id2name[i].lower())]
+
+    # -- tag editing (rename / re-parent / delete) ------------------------
+    # Rename and re-parent are inherently retroactive: photos point at the tag,
+    # and the chain is computed live, so every tagged photo follows the edit.
+
+    def _descendant_ids(self, tag_id: int) -> set[int]:
+        out: set[int] = set()
+        seen = {tag_id}
+        stack = [tag_id]
+        while stack:
+            for cid, _ in self._children_ids(stack.pop()):
+                if cid not in seen:
+                    seen.add(cid)
+                    out.add(cid)
+                    stack.append(cid)
+        return out
+
+    def rename_tag(self, tag_id: int, new_name: str) -> None:
+        """Rename a tag (applies everywhere it's used). Rejects an empty name or
+        a collision with a different existing tag (that would be a merge)."""
+        new_name = new_name.strip()
+        if not new_name:
+            raise ValueError("Tag name can't be empty")
+        existing = self.find_tag(new_name)
+        if existing is not None and existing != tag_id:
+            raise ValueError(f"A tag named '{new_name}' already exists")
+        self.conn.execute("UPDATE tags SET name = ? WHERE id = ?", (new_name, tag_id))
+        self.conn.commit()
+
+    def set_parent(self, tag_id: int, parent_id: int | None) -> None:
+        """Move a tag under ``parent_id`` (replacing any existing parent), or to
+        the top level if ``parent_id`` is None. Cycle-guarded."""
+        if parent_id is not None:
+            if parent_id == tag_id or parent_id in self._descendant_ids(tag_id):
+                raise ValueError("Can't move a tag under itself or its own child")
+        self.conn.execute("DELETE FROM tag_parents WHERE child_id = ?", (tag_id,))
+        if parent_id is not None:
+            self._link_parent(parent_id, tag_id)
+        self.conn.commit()
+
+    def delete_tag(self, tag_id: int) -> None:
+        """Delete a tag: its children re-parent up to its parent (nothing is
+        orphaned), photos lose the tag, and its aliases are removed."""
+        parents = [pid for pid, _ in self._parents(tag_id)]
+        child_ids = [cid for cid, _ in self._children_ids(tag_id)]
+        self.conn.execute(
+            "DELETE FROM tag_parents WHERE child_id = ? OR parent_id = ?",
+            (tag_id, tag_id),
+        )
+        if parents:
+            for cid in child_ids:  # graft children onto the grandparent
+                self._link_parent(parents[0], cid)
+        self.conn.execute("DELETE FROM tag_entries WHERE tag_id = ?", (tag_id,))
+        if "tag_aliases" in self._tables():
+            self.conn.execute("DELETE FROM tag_aliases WHERE tag_id = ?", (tag_id,))
+        self.conn.execute("DELETE FROM tags WHERE id = ?", (tag_id,))
+        self.conn.commit()
 
     def is_ancestor(self, a: str, b: str) -> bool:
         ca = self.canonical_name(a)

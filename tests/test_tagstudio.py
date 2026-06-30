@@ -136,6 +136,64 @@ def test_bulk_apply_to_multiple_entries(sample_lib):
             assert "Phoenix" in lib.tags_for_entry(e.id)
 
 
+def test_rename_is_retroactive(sample_lib):
+    with TagStudioLibrary(sample_lib) as lib:
+        e = lib.entries(limit=1)[0]
+        lib.apply_entity(e.id, "Phoenix", ["Location", "USA", "Arizona"])
+        lib.rename_tag(lib.find_tag("Phoenix"), "Phoenix, AZ")
+        # The photo follows the rename with no per-photo update.
+        assert "Phoenix, AZ" in lib.tags_for_entry(e.id)
+        assert lib.find_tag("Phoenix") is None
+
+
+def test_reparent_is_retroactive(sample_lib):
+    with TagStudioLibrary(sample_lib) as lib:
+        e = lib.entries(limit=1)[0]
+        lib.learn("Phoenix", "Location > USA > Arizona")
+        lib.learn("California", "Location > USA")
+        lib.apply_entity(e.id, "Moms House", ["Location", "USA", "Arizona", "Phoenix"])
+        # Move Phoenix under California; the photo's chain updates automatically.
+        lib.set_parent(lib.find_tag("Phoenix"), lib.find_tag("California"))
+        assert lib.full_path("Moms House") == [
+            "Location", "USA", "California", "Phoenix", "Moms House",
+        ]
+
+
+def test_reparent_to_root(sample_lib):
+    with TagStudioLibrary(sample_lib) as lib:
+        lib.learn("Phoenix", "Location > USA > Arizona")
+        lib.set_parent(lib.find_tag("Phoenix"), None)
+        assert lib.resolve_chain("Phoenix") == []
+
+
+def test_reparent_cycle_rejected(sample_lib):
+    with TagStudioLibrary(sample_lib) as lib:
+        lib.learn("Moms House", "Location > USA > Arizona > Phoenix")
+        with pytest.raises(ValueError):
+            # Can't move Arizona under its own descendant Phoenix.
+            lib.set_parent(lib.find_tag("Arizona"), lib.find_tag("Phoenix"))
+
+
+def test_rename_collision_rejected(sample_lib):
+    with TagStudioLibrary(sample_lib) as lib:
+        lib.learn("Phoenix", "Location > USA > Arizona")
+        lib.learn("Tempe", "Arizona")
+        with pytest.raises(ValueError):
+            lib.rename_tag(lib.find_tag("Tempe"), "Phoenix")
+
+
+def test_delete_tag_regrafts_children(sample_lib):
+    with TagStudioLibrary(sample_lib) as lib:
+        e = lib.entries(limit=1)[0]
+        lib.learn("Moms House", "Location > USA > Arizona > Phoenix")
+        lib.apply_entity(e.id, "Moms House", ["Location", "USA", "Arizona", "Phoenix"])
+        # Delete Phoenix: Moms House grafts up to Arizona.
+        lib.delete_tag(lib.find_tag("Phoenix"))
+        assert lib.find_tag("Phoenix") is None
+        assert lib.full_path("Moms House") == ["Location", "USA", "Arizona", "Moms House"]
+        assert "Moms House" in lib.tags_for_entry(e.id)
+
+
 def test_resolve_chain_heals_multi_parent(sample_lib):
     # A stray direct USA->Phoenix link (from an earlier bug) must not shorten
     # the chain; resolve_chain picks the deepest parent (Arizona).
