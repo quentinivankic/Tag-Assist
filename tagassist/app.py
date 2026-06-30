@@ -264,8 +264,21 @@ def create_app(config: Config) -> FastAPI:
             if target_id.strip():
                 tid = int(target_id)
             else:
-                tid = lib.find_tag(target_name)
-                if tid is None:
+                # Resolve by typed name. If multiple tags share the name (the
+                # bad-duplicate case), prefer one that ISN'T the source.
+                rows = lib.conn.execute(
+                    "SELECT id FROM tags WHERE name = ? COLLATE NOCASE", (target_name,)
+                ).fetchall()
+                others = [r["id"] for r in rows if r["id"] != source_id]
+                if others:
+                    tid = others[0]
+                elif rows:
+                    raise HTTPException(
+                        400,
+                        f"'{target_name}' resolves to the same tag. "
+                        "Drag one onto the other to merge them.",
+                    )
+                else:
                     raise HTTPException(400, f"No tag named '{target_name}'")
             try:
                 lib.merge_tag(source_id, tid)

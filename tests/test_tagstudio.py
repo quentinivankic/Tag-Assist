@@ -227,6 +227,20 @@ def test_merge_moves_photos_and_children(sample_lib):
         assert lib.duplicate_name_tags() == {}
 
 
+def test_merge_handles_self_resolving_target_via_endpoint_logic(sample_lib):
+    # Two same-named tags: typed-name resolution must prefer the non-source one
+    # (mirrors what the /tag/merge endpoint does).
+    with TagStudioLibrary(sample_lib) as lib:
+        a = lib._insert_with_defaults("tags", {"name": "Spot"})
+        b = lib._insert_with_defaults("tags", {"name": "Spot"})
+        lib.conn.commit()
+        rows = lib.conn.execute(
+            "SELECT id FROM tags WHERE name = ? COLLATE NOCASE", ("Spot",)
+        ).fetchall()
+        others = [r["id"] for r in rows if r["id"] != a]
+        assert others == [b]  # the resolution picks the OTHER Spot, not the source
+
+
 def test_merge_into_descendant_rejected(sample_lib):
     with TagStudioLibrary(sample_lib) as lib:
         lib.learn("Moms House", "Location > USA > Arizona > Phoenix")

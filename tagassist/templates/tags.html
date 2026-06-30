@@ -168,8 +168,12 @@ document.querySelectorAll(".mrg").forEach(m => {
     const input = bar.querySelector("input"); input.focus();
     const go = async () => {
       const target = input.value.trim();
-      if(!target || target.toLowerCase() === m.dataset.name.toLowerCase()){ msg("Pick a different tag", true); return; }
-      if(!confirm(`Move every photo tagged "${m.dataset.name}" onto "${target}", and any children with it? "${m.dataset.name}" will be deleted (its name becomes an alias of "${target}").`)) return;
+      if(!target){ msg("Pick a target tag", true); return; }
+      const sameName = target.toLowerCase() === m.dataset.name.toLowerCase();
+      const note = sameName
+        ? `(Both tags share the name "${target}" — exactly the duplicate-merge case.) `
+        : "";
+      if(!confirm(`${note}Move every photo tagged "${m.dataset.name}" onto "${target}", and any children with it? The source will be deleted.`)) return;
       try { await post("/tag/merge", { source_id: m.dataset.id, target_name: target }); location.reload(); }
       catch(err){ msg(err.message, true); }
     };
