@@ -43,7 +43,12 @@ _TEMPLATES = Jinja2Templates(directory=str(Path(__file__).parent / "templates"))
 _WEB_SAFE = {".jpg", ".jpeg", ".png", ".gif", ".webp", ".bmp", ".svg"}
 
 # Which top-level category each interview box suggests for *new* entities.
-_BOX_CATEGORY = {"people": "People", "location": "Location", "context": "Context"}
+_BOX_CATEGORY = {
+    "people": "People",
+    "location": "Location",
+    "context": "Context",
+    "phototype": "Type",
+}
 
 
 def _backup_on_startup(library_root: str, *, keep: int = 10) -> None:
@@ -354,7 +359,12 @@ def create_app(config: Config) -> FastAPI:
     # -- parse & write ---------------------------------------------------
 
     @app.post("/preview")
-    def preview(people: str = Form(""), location: str = Form(""), context: str = Form("")):
+    def preview(
+        people: str = Form(""),
+        location: str = Form(""),
+        context: str = Form(""),
+        phototype: str = Form(""),
+    ):
         """Parse answers into entity items (no DB writes).
 
         Each item is ``known`` (an existing tag -> full chain returned for silent
@@ -366,7 +376,12 @@ def create_app(config: Config) -> FastAPI:
             known_found: list[str] = []
             unknown_found: list[tuple[str, str]] = []
             seen: set[str] = set()
-            for box, answer in (("people", people), ("location", location), ("context", context)):
+            for box, answer in (
+                ("people", people),
+                ("location", location),
+                ("context", context),
+                ("phototype", phototype),
+            ):
                 category = _BOX_CATEGORY[box]
                 for name in llm.parse_answer(answer, category, known_names):
                     disp = lib.canonical_name(name)

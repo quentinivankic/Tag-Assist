@@ -34,6 +34,12 @@ QUESTIONS: list[dict[str, str]] = [
         "prompt": "What's happening here?",
         "hint": "e.g. sunset hike, group trip 2023",
     },
+    {
+        "key": "phototype",
+        "category": "Type",
+        "prompt": "What type of photo?",
+        "hint": "e.g. screenshot, selfie, GIF, document",
+    },
 ]
 
 # Filler words/phrases stripped from answers before splitting into tags.
