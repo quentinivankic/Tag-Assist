@@ -17,7 +17,10 @@ import os
 import sys
 from pathlib import Path
 
-from tagassist.tagstudio import TagStudioLibrary
+# Allow `python scripts/dump_tags.py` from the project root.
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
+from tagassist.tagstudio import TagStudioLibrary  # noqa: E402
 
 
 def main() -> None:
