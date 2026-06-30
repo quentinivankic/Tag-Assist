@@ -47,6 +47,17 @@
   .mergebar button { padding:3px 10px; font-size:13px; border-radius:6px;
                     border:1px solid var(--line); background:#262b35; color:var(--text); cursor:pointer; }
   .mergebar button.go { background:var(--accent); border-color:var(--accent); color:#0a0f1a; font-weight:700; }
+  .create { background:var(--panel); border:1px solid var(--line); border-radius:10px;
+            padding:12px 14px; margin-bottom:14px; }
+  .create h3 { margin:0 0 8px; font-size:13px; color:var(--muted);
+               text-transform:uppercase; letter-spacing:.5px; font-weight:600; }
+  .create .row { display:flex; gap:8px; flex-wrap:wrap; align-items:center; }
+  .create input { flex:1 1 160px; padding:8px 10px; border-radius:8px;
+                  border:1px solid var(--line); background:#161922; color:var(--text); font-size:14px; }
+  .create input:focus { outline:none; border-color:var(--accent); }
+  .create button { padding:8px 16px; border-radius:8px; background:var(--accent);
+                   border:1px solid var(--accent); color:#0a0f1a; font-weight:700; cursor:pointer; font-size:14px; }
+  .create button:hover { filter:brightness(1.1); }
   .ren { padding:3px 8px; border-radius:8px; border:1px solid var(--accent);
          background:#161922; color:var(--text); font-size:15px; }
   .empty { color:var(--muted); }
@@ -64,6 +75,16 @@
 <main>
   <div class="hint">Double-click to rename · drag onto another to nest it · drag to the bar below to pull to top-level · ↪ to merge into another tag · × to delete. Changes apply to every photo automatically.</div>
   <datalist id="all-tags">{% for n in known_nodes %}<option value="{{ n }}"></option>{% endfor %}</datalist>
+
+  <div class="create">
+    <h3>+ Create a new tag</h3>
+    <div class="row">
+      <input type="text" id="new-name" placeholder="new tag name (e.g. Camelback Mountain)">
+      <input type="text" id="new-parent" list="all-tags"
+             placeholder="under (optional) — e.g. Phoenix, or Location > USA > Arizona">
+      <button type="button" id="create-btn">Create</button>
+    </div>
+  </div>
   <input id="filter" type="text" placeholder="filter tags… (type any name)" autocomplete="off">
   <div id="rootzone">⬆ drop a tag here to pull it out to the top level</div>
 
@@ -103,6 +124,25 @@ async function post(url, obj){
 }
 
 let draggedId = null, draggedName = null;
+
+// Create a new tag, optionally nested.
+const createBtn = document.getElementById("create-btn");
+const newName = document.getElementById("new-name");
+const newParent = document.getElementById("new-parent");
+async function createTag(){
+  const name = newName.value.trim();
+  const chain = newParent.value.trim();
+  if(!name){ msg("Type a tag name first", true); newName.focus(); return; }
+  try {
+    const data = await post("/tag/create", { name, chain });
+    const path = (data.chain || []).concat(data.name).join(" > ");
+    msg("Created " + path); location.reload();
+  } catch(err){ msg(err.message, true); }
+}
+createBtn.onclick = createTag;
+[newName, newParent].forEach(inp => {
+  inp.addEventListener("keydown", e => { if(e.key === "Enter"){ e.preventDefault(); createTag(); }});
+});
 
 document.querySelectorAll(".tag").forEach(tag => {
   tag.addEventListener("dragstart", e => {

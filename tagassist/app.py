@@ -232,6 +232,24 @@ def create_app(config: Config) -> FastAPI:
             },
         )
 
+    @app.post("/tag/create")
+    def tag_create(name: str = Form(...), chain: str = Form("")):
+        """Create a new tag, optionally nested under a path like 'Pets > Dog'.
+        Refuses if the name already exists — use rename/merge for that case."""
+        name = name.strip()
+        if not name:
+            raise HTTPException(400, "Tag name can't be empty")
+        with open_lib() as lib:
+            if lib.is_known(name):
+                raise HTTPException(
+                    400,
+                    f"A tag named '{name}' already exists. Use rename or merge "
+                    "instead.",
+                )
+            leaf = lib.learn(name, chain)
+            out = {"name": leaf, "chain": lib.resolve_chain(leaf)}
+        return JSONResponse(out)
+
     @app.post("/tag/rename")
     def tag_rename(tag_id: int = Form(...), name: str = Form(...)):
         with open_lib() as lib:
