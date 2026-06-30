@@ -107,6 +107,35 @@ def test_learn_and_resolve_chain_from_db(sample_lib):
         assert lib.canonical_name("phoenix") == "Phoenix"  # case-insensitive
 
 
+def test_leaf_descendants_and_tree(sample_lib):
+    with TagStudioLibrary(sample_lib) as lib:
+        lib.learn("Camelback Mountain", "Location > USA > Arizona")
+        lib.learn("Moms House", "Location > USA > Arizona > Phoenix")
+        lib.learn("South Mountain", "Phoenix")
+        lib.learn("Tempe", "Arizona")  # a leaf city with no children
+        # All bottom spots anywhere under Arizona, regardless of city depth.
+        leaves = lib.leaf_descendants("Arizona")
+        assert set(leaves) == {"Camelback Mountain", "Moms House", "South Mountain", "Tempe"}
+        # Phoenix is NOT a leaf (it has children) so it isn't listed.
+        assert "Phoenix" not in leaves
+        # descendants() includes the intermediate Phoenix.
+        assert "Phoenix" in lib.descendants("Arizona")
+        # The full tree has Location as a root with USA beneath it.
+        tree = {n["name"]: n for n in lib.tag_tree()}
+        assert "Location" in tree
+        usa = [c for c in tree["Location"]["children"] if c["name"] == "USA"]
+        assert usa and any(c["name"] == "Arizona" for c in usa[0]["children"])
+
+
+def test_bulk_apply_to_multiple_entries(sample_lib):
+    with TagStudioLibrary(sample_lib) as lib:
+        e1, e2, e3 = lib.entries(limit=3)
+        for e in (e1, e2, e3):
+            lib.apply_entity(e.id, "Phoenix", ["Location", "USA", "Arizona"])
+        for e in (e1, e2, e3):
+            assert "Phoenix" in lib.tags_for_entry(e.id)
+
+
 def test_resolve_chain_heals_multi_parent(sample_lib):
     # A stray direct USA->Phoenix link (from an earlier bug) must not shorten
     # the chain; resolve_chain picks the deepest parent (Arizona).

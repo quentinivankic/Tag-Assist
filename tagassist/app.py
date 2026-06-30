@@ -88,25 +88,30 @@ def create_app(config: Config) -> FastAPI:
                     "name": disp, "status": "known", "chain": lib.resolve_chain(disp),
                 })
 
-        if city and lib.is_known(city):
-            for child in lib.children(city):        # Moms House, My Apartment...
-                if child.lower() not in seen:
-                    seen.add(child.lower())
+        # 1. All specific spots within the geocoded area: take the broadest
+        #    KNOWN location node (state preferred, so you see every place tagged
+        #    in Arizona, not just the exact city) and list its leaf descendants.
+        anchor = next((c for c in (state, city) if c and lib.is_known(c)), None)
+        if anchor:
+            for leaf in lib.leaf_descendants(anchor):
+                if leaf.lower() not in seen:
+                    seen.add(leaf.lower())
                     options.append({
-                        "name": child, "status": "known", "chain": lib.resolve_chain(child),
+                        "name": leaf, "status": "known", "chain": lib.resolve_chain(leaf),
                     })
-            add_known(city)
-        elif city:
-            path = " > ".join(p for p in ("Location", country, state) if p)
-            options.append({"name": city, "status": "unknown", "suggested_path": path})
-            seen.add(city.lower())
 
-        if state and state.lower() not in seen:
-            if lib.is_known(state):
-                add_known(state)
+        # 2. The city / state nodes themselves: apply if known, else offer to teach.
+        for cand, parents in ((city, ("Location", country, state)), (state, ("Location", country))):
+            if not cand or cand.lower() in seen:
+                continue
+            if lib.is_known(cand):
+                add_known(cand)
             else:
-                path = " > ".join(p for p in ("Location", country) if p)
-                options.append({"name": state, "status": "unknown", "suggested_path": path})
+                seen.add(cand.lower())
+                options.append({
+                    "name": cand, "status": "unknown",
+                    "suggested_path": " > ".join(p for p in parents if p),
+                })
         return {"label": label, "options": options}
 
     # -- navigation ------------------------------------------------------
@@ -132,7 +137,14 @@ def create_app(config: Config) -> FastAPI:
             entry = lib.get_entry(entry_id)
             if entry is None:
                 raise HTTPException(404, "Entry not found")
-            all_ids = [e.id for e in lib.entries()]
+            feed = lib.entries()
+            all_ids = [e.id for e in feed]
+            cur_pos = next((k for k, e in enumerate(feed) if e.id == entry_id), 0)
+            # Filmstrip: current photo + the next ~49 (feed order) for bulk tagging.
+            strip = [
+                {"id": e.id, "filename": e.filename, "tagged": bool(e.tags)}
+                for e in feed[cur_pos:cur_pos + 50]
+            ]
             existing = entry.tags
             meta = exif.read_meta(entry.abs_path) if entry.abs_path.exists() else exif.PhotoMeta()
             geo = build_geo(lib, meta)
@@ -156,6 +168,7 @@ def create_app(config: Config) -> FastAPI:
                 "people_hint": people_hint,
                 "face_suggestions": face_suggestions,
                 "known_nodes": known_nodes,
+                "strip": strip,
                 "position": idx + 1,
                 "total": len(all_ids),
                 "prev_id": prev_id,
@@ -184,6 +197,34 @@ def create_app(config: Config) -> FastAPI:
             return Response(content=buf.getvalue(), media_type="image/jpeg")
         except Exception:
             return FileResponse(path)  # last resort: let the browser try
+
+    @app.get("/thumb/{entry_id}")
+    def thumb(entry_id: int):
+        """Small JPEG for the bulk-tag filmstrip (any source format)."""
+        with open_lib() as lib:
+            entry = lib.get_entry(entry_id)
+            if entry is None or not entry.abs_path.exists():
+                raise HTTPException(404, "Image not found")
+            path = entry.abs_path
+        try:
+            with Image.open(path) as img:
+                img = img.convert("RGB")
+                img.thumbnail((220, 220))
+                buf = BytesIO()
+                img.save(buf, "JPEG", quality=78)
+            return Response(content=buf.getvalue(), media_type="image/jpeg")
+        except Exception:
+            raise HTTPException(404, "Cannot render thumbnail")
+
+    @app.get("/tags", response_class=HTMLResponse)
+    def tags(request: Request):
+        """A browsable view of the whole tag hierarchy."""
+        with open_lib() as lib:
+            tree = lib.tag_tree()
+            count = len(lib.all_tag_names())
+        return _TEMPLATES.TemplateResponse(
+            request, "tags.html", {"tree": tree, "count": count}
+        )
 
     # -- parse & write ---------------------------------------------------
 
@@ -250,33 +291,52 @@ def create_app(config: Config) -> FastAPI:
         return JSONResponse(out)
 
     @app.post("/commit")
-    def commit(entry_id: int = Form(...), entities_json: str = Form("[]")):
-        """Write confirmed entities (each {name, chain}) into TagStudio, nested."""
+    def commit(
+        current_id: int = Form(...),
+        entry_ids: str = Form("[]"),
+        entities_json: str = Form("[]"),
+    ):
+        """Write confirmed entities (each {name, chain}) into one OR MANY photos.
+
+        ``entry_ids`` is a JSON list of the selected photo ids (the filmstrip
+        selection, including the current photo). The same tags are applied to
+        every selected photo. ``current_id`` is the photo on screen, used to
+        decide which photo to advance to next.
+        """
         try:
             payload = json.loads(entities_json)
-        except ValueError:
-            raise HTTPException(400, "Bad entities payload")
+            targets = [int(i) for i in json.loads(entry_ids)]
+        except (ValueError, TypeError):
+            raise HTTPException(400, "Bad payload")
+        if not targets:
+            targets = [current_id]
         by_name = {
             (it.get("name") or "").strip(): it
             for it in payload if (it.get("name") or "").strip()
         }
         added: list[str] = []
         with open_lib() as lib:
-            entry = lib.get_entry(entry_id)
-            if entry is None:
-                raise HTTPException(404, "Entry not found")
             keep = {n.lower() for n in lib.collapse_descendants(list(by_name))}
-            for name, item in by_name.items():
-                if name.lower() not in keep:
+            for tid in targets:
+                if lib.get_entry(tid) is None:
                     continue
-                chain = [c for c in item.get("chain", []) if c and c.strip()]
-                if lib.apply_entity(entry_id, name, chain):
-                    added.append(name)
+                for name, item in by_name.items():
+                    if name.lower() not in keep:
+                        continue
+                    chain = [c for c in item.get("chain", []) if c and c.strip()]
+                    if lib.apply_entity(tid, name, chain):
+                        added.append(name)
             all_ids = [e.id for e in lib.entries()]
 
-        idx = all_ids.index(entry_id) if entry_id in all_ids else -1
-        next_id = all_ids[idx + 1] if 0 <= idx < len(all_ids) - 1 else None
-        return JSONResponse({"added": added, "next_id": next_id})
+        # Advance to the next photo in the feed that wasn't just tagged.
+        selected = set(targets)
+        next_id = None
+        if current_id in all_ids:
+            start = all_ids.index(current_id) + 1
+            next_id = next((i for i in all_ids[start:] if i not in selected), None)
+        return JSONResponse({
+            "added": added, "photos": len(targets), "next_id": next_id,
+        })
 
     @app.get("/health")
     def health():

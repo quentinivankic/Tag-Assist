@@ -1,0 +1,70 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Tag-Assist — all tags</title>
+<style>
+  :root { --bg:#15171c; --panel:#1f2229; --line:#30343d; --accent:#6aa9ff;
+          --accent2:#7ee0a0; --text:#e6e8ec; --muted:#9aa0ab; }
+  * { box-sizing:border-box; }
+  body { margin:0; font:15px/1.6 system-ui,Segoe UI,Roboto,sans-serif;
+         background:var(--bg); color:var(--text); }
+  header { display:flex; align-items:center; gap:14px; padding:12px 18px;
+           border-bottom:1px solid var(--line); background:var(--panel); }
+  header .brand { font-weight:700; }
+  header .muted { color:var(--muted); }
+  header a { margin-left:auto; color:var(--accent); text-decoration:none;
+             border:1px solid var(--line); padding:4px 10px; border-radius:999px; font-size:13px; }
+  main { max-width:900px; margin:22px auto; padding:0 18px; }
+  #filter { width:100%; padding:10px 12px; border-radius:8px; border:1px solid var(--line);
+            background:#161922; color:var(--text); font-size:15px; margin-bottom:18px; }
+  #filter:focus { outline:none; border-color:var(--accent); }
+  ul { list-style:none; margin:0; padding-left:18px; border-left:1px solid var(--line); }
+  ul.root { padding-left:0; border-left:none; }
+  li { margin:2px 0; }
+  .tag { display:inline-block; padding:3px 9px; border-radius:8px; background:#202634;
+         border:1px solid var(--line); }
+  .tag.cat { color:var(--accent); font-weight:600; }
+  .tag.leaf { color:var(--text); }
+  .count { color:var(--muted); font-size:12px; margin-left:6px; }
+  .empty { color:var(--muted); }
+</style>
+</head>
+<body>
+<header>
+  <span class="brand">🏷️ Tag-Assist</span>
+  <span class="muted">all tags — {{ count }} total</span>
+  <a href="/">← back to tagging</a>
+</header>
+<main>
+  <input id="filter" type="text" placeholder="filter tags… (type any name)" autocomplete="off">
+  {% macro node(n) %}
+    <li data-name="{{ n.name|lower }}">
+      <span class="tag {{ 'cat' if n.children else 'leaf' }}">{{ n.name }}</span>
+      {% if n.children %}<span class="count">{{ n.children|length }}</span>
+        <ul>{% for c in n.children %}{{ node(c) }}{% endfor %}</ul>
+      {% endif %}
+    </li>
+  {% endmacro %}
+  {% if tree %}
+    <ul class="root">{% for n in tree %}{{ node(n) }}{% endfor %}</ul>
+  {% else %}
+    <p class="empty">No tags yet — go tag some photos.</p>
+  {% endif %}
+</main>
+<script>
+// Live filter: show a tag (and its ancestors) when its name matches.
+const filter = document.getElementById("filter");
+filter.addEventListener("input", () => {
+  const q = filter.value.trim().toLowerCase();
+  document.querySelectorAll("li").forEach(li => {
+    if(!q){ li.style.display = ""; return; }
+    const self = (li.dataset.name || "").includes(q);
+    const descMatch = li.querySelector(`li[data-name*="${CSS.escape(q)}"]`) !== null;
+    li.style.display = (self || descMatch) ? "" : "none";
+  });
+});
+</script>
+</body>
+</html>

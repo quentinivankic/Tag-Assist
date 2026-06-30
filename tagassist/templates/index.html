@@ -14,7 +14,10 @@
            border-bottom:1px solid var(--line); background:var(--panel); }
   header .brand { font-weight:700; letter-spacing:.3px; }
   header .pos { color:var(--muted); }
-  header .badges { margin-left:auto; display:flex; gap:8px; }
+  header .badges { margin-left:auto; display:flex; gap:8px; align-items:center; }
+  .toplink { font-size:13px; color:var(--accent); text-decoration:none;
+             border:1px solid var(--line); padding:4px 10px; border-radius:999px; }
+  .toplink:hover { border-color:var(--accent); }
   .badge { font-size:12px; padding:3px 9px; border-radius:999px;
            border:1px solid var(--line); color:var(--muted); }
   .badge.on { color:var(--accent2); border-color:var(--accent2); }
@@ -75,6 +78,22 @@
   .nav { margin-left:auto; display:flex; gap:8px; }
   .status { margin-top:12px; min-height:20px; font-size:14px; color:var(--accent2); }
   a.navlink { color:var(--accent); text-decoration:none; }
+  /* bulk-tag filmstrip */
+  .strip { max-width:1100px; margin:0 auto 28px; padding:0 18px; }
+  .strip .bar { display:flex; align-items:center; gap:12px; margin-bottom:8px; flex-wrap:wrap; }
+  .strip .bar h3 { font-size:14px; margin:0; font-weight:600; }
+  .strip .bar .muted { color:var(--muted); font-size:13px; }
+  .thumbs { display:flex; gap:8px; overflow-x:auto; padding:6px 2px; }
+  .thumb { position:relative; flex:0 0 auto; width:96px; height:96px; border-radius:8px;
+           overflow:hidden; border:2px solid transparent; cursor:pointer; background:#000; }
+  .thumb img { width:100%; height:100%; object-fit:cover; display:block; }
+  .thumb.sel { border-color:var(--accent); }
+  .thumb .tick { position:absolute; top:4px; left:4px; width:18px; height:18px; border-radius:4px;
+                 background:rgba(0,0,0,.55); color:#fff; font-size:13px; line-height:18px; text-align:center; }
+  .thumb.sel .tick { background:var(--accent); color:#0a0f1a; }
+  .thumb .tagged { position:absolute; top:3px; right:4px; font-size:11px; }
+  .thumb.cur::after { content:'current'; position:absolute; bottom:0; left:0; right:0;
+                 font-size:10px; text-align:center; background:rgba(106,169,255,.85); color:#0a0f1a; }
 </style>
 </head>
 <body>
@@ -82,6 +101,7 @@
   <span class="brand">🏷️ Tag-Assist</span>
   <span class="pos">photo {{ position }} / {{ total }} — {{ entry.filename }}</span>
   <div class="badges">
+    <a class="toplink" href="/tags" target="_blank">🗂 Browse tags</a>
     <span class="badge {{ 'on' if llm_on else '' }}">LLM {{ 'on' if llm_on else 'off' }}</span>
     <span class="badge {{ 'on' if faces_on else '' }}">faces {{ 'on' if faces_on else 'off' }}</span>
   </div>
@@ -148,11 +168,34 @@
   </section>
 </main>
 
+{% if strip|length > 1 %}
+<section class="strip">
+  <div class="bar">
+    <h3>Bulk tag</h3>
+    <span class="muted" id="sel-count"></span>
+    <button type="button" class="ghost small" id="sel-all">select all</button>
+    <button type="button" class="ghost small" id="sel-clear">clear</button>
+    <span class="muted">— the tags you save apply to every selected photo</span>
+  </div>
+  <div class="thumbs">
+    {% for s in strip %}
+    <div class="thumb {{ 'cur' if s.id == entry.id else '' }}" data-id="{{ s.id }}" title="{{ s.filename }}">
+      <img src="/thumb/{{ s.id }}" loading="lazy" onerror="this.style.opacity=0.25">
+      <span class="tick"></span>
+      {% if s.tagged %}<span class="tagged">🏷️</span>{% endif %}
+    </div>
+    {% endfor %}
+  </div>
+</section>
+{% endif %}
+
 <script>
 const KEYS = [{% for q in questions %}"{{ q.key }}"{% if not loop.last %},{% endif %}{% endfor %}];
 const nextId = {{ next_id if next_id is not none else 'null' }};
 const YEAR = {{ meta.year if meta.year else 'null' }};
 const GEO = {{ geo | tojson }};
+const CURRENT_ID = {{ entry.id }};
+const selectedIds = new Set([CURRENT_ID]);
 
 // Confirmed entities to write: [{name, chain:[...]}]
 let confirmed = [];
@@ -175,9 +218,9 @@ function renderConfirmed(){
     box.appendChild(el);
   });
   wrap.style.display = confirmed.length ? "" : "none";
+  updateSelCount();
 }
-// Collapse to the deepest: drop any confirmed entity that is an ancestor of
-// another confirmed entity (it's already covered via the child's nesting).
+// Collapse to the deepest: drop a confirmed entity that is an ancestor of another.
 function collapseConfirmed(){
   const ancestors = new Set();
   confirmed.forEach(e => (e.chain || []).forEach(c => ancestors.add(c.toLowerCase())));
@@ -191,9 +234,7 @@ function addConfirmed(name, chain){
   renderConfirmed();
 }
 
-// Render a "what is X?" teach card for an unknown entity.
-// Auto-resolve any still-pending teach card that just became known (e.g. after
-// teaching a deep place path, the leftover "What is Phoenix?" card disappears).
+// Auto-resolve a still-pending teach card that just became known.
 function resolvePending(node){
   document.querySelectorAll("#teach-area .teach").forEach(c => {
     if(c.dataset.entity === node.name.toLowerCase()){
@@ -208,7 +249,6 @@ function teachCard(name, suggested, didYouMean){
   card.className = "teach";
   card.dataset.entity = name.toLowerCase();
 
-  // The normal "teach me the parent path" body.
   function renderTeach(){
     card.innerHTML = `
       <div class="q">What is <b>${name}</b>? <span style="color:var(--muted)">— a path like "Pets > Dog", or just "Dog"</span></div>
@@ -236,7 +276,6 @@ function teachCard(name, suggested, didYouMean){
     card.querySelector("[data-skip]").onclick = () => { card.remove(); maybeDoneTeaching(); };
   }
 
-  // The "did you mean an existing one?" body — only when a near-match exists.
   function renderDidYouMean(match){
     card.innerHTML = `
       <div class="q">You typed <b>${name}</b> — did you mean <b>${match}</b>?</div>
@@ -246,7 +285,7 @@ function teachCard(name, suggested, didYouMean){
       </div>`;
     card.querySelector("[data-yes]").onclick = async () => {
       const fd = new FormData();
-      fd.append("name", name);     // the typed spelling -> becomes an alias
+      fd.append("name", name);
       fd.append("target", match);
       try {
         const r = await fetch("/alias", { method:"POST", body: fd });
@@ -274,40 +313,7 @@ function maybeDoneTeaching(){
   }
 }
 
-document.querySelectorAll("[data-reuse]").forEach(s => {
-  s.onclick = () => { document.querySelector('input[name=people]').value += (document.querySelector('input[name=people]').value ? ", " : "") + s.dataset.reuse; };
-});
-
-document.getElementById("preview-btn").onclick = async () => {
-  setStatus("thinking…");
-  document.getElementById("teach-area").innerHTML = "";
-  const fd = new FormData();
-  KEYS.forEach(k => fd.append(k, document.querySelector(`[name="${k}"]`).value));
-  let data;
-  try {
-    const r = await fetch("/preview", { method:"POST", body: fd });
-    data = await r.json();
-  } catch(e){ setStatus("preview failed: " + e, true); return; }
-
-  const teachArea = document.getElementById("teach-area");
-  let unknowns = 0;
-  (data.items || []).forEach(item => {
-    if(item.status === "known"){
-      addConfirmed(item.name, item.chain);     // auto-applied silently
-    } else {
-      unknowns++;
-      teachArea.appendChild(teachCard(item.name, item.suggested, item.did_you_mean));
-    }
-  });
-  if((data.items || []).length === 0){ setStatus("No names found in your answers.", false); return; }
-  setStatus(unknowns
-    ? `Tell me what the new ${unknowns === 1 ? "name is" : "names are"} — known ones are already added below.`
-    : `All recognized — review below and save.${data.llm ? " (via local LLM)" : ""}`);
-};
-
-// Render the "from GPS" quick-pick chips. Known places (incl. children of the
-// geocoded city, e.g. Phoenix -> Moms House) apply on click; new place names
-// open a teach card pre-filled with the geographic path.
+// -- GPS quick-pick: known spots apply on click; new names open a teach card.
 function renderGeo(){
   const area = document.getElementById("geo-area");
   if(!GEO){ return; }
@@ -333,24 +339,86 @@ function renderGeo(){
   });
 }
 
-// On load: auto-fill the capture year as a tag, and show GPS suggestions.
-if(YEAR){ addConfirmed(String(YEAR), []); }
-renderGeo();
+document.querySelectorAll("[data-reuse]").forEach(s => {
+  s.onclick = () => { const i = document.querySelector('input[name=people]'); i.value += (i.value ? ", " : "") + s.dataset.reuse; };
+});
+
+document.getElementById("preview-btn").onclick = async () => {
+  setStatus("thinking…");
+  document.getElementById("teach-area").innerHTML = "";
+  const fd = new FormData();
+  KEYS.forEach(k => fd.append(k, document.querySelector(`[name="${k}"]`).value));
+  let data;
+  try {
+    const r = await fetch("/preview", { method:"POST", body: fd });
+    data = await r.json();
+  } catch(e){ setStatus("preview failed: " + e, true); return; }
+
+  const teachArea = document.getElementById("teach-area");
+  let unknowns = 0;
+  (data.items || []).forEach(item => {
+    if(item.status === "known"){ addConfirmed(item.name, item.chain); }
+    else { unknowns++; teachArea.appendChild(teachCard(item.name, item.suggested, item.did_you_mean)); }
+  });
+  if((data.items || []).length === 0){ setStatus("No names found in your answers.", false); return; }
+  setStatus(unknowns
+    ? `Tell me what the new ${unknowns === 1 ? "name is" : "names are"} — known ones are already added below.`
+    : `All recognized — review below and save.${data.llm ? " (via local LLM)" : ""}`);
+};
 
 document.getElementById("commit-btn").onclick = async () => {
   setStatus("saving…");
   const fd = new FormData();
-  fd.append("entry_id", document.getElementById("interview").dataset.entry);
+  fd.append("current_id", CURRENT_ID);
+  fd.append("entry_ids", JSON.stringify([...selectedIds]));
   fd.append("entities_json", JSON.stringify(confirmed));
   let data;
   try {
     const r = await fetch("/commit", { method:"POST", body: fd });
     data = await r.json();
   } catch(e){ setStatus("save failed: " + e, true); return; }
-  setStatus(`✓ Wrote ${data.added.length} tag(s) to TagStudio. ` +
-    (data.next_id ? "Loading next photo…" : "That was the last photo."));
+  setStatus(`✓ Saved ${confirmed.length} tag(s) to ${data.photos} photo(s). ` +
+    (data.next_id ? "Loading next…" : "That was the end of the feed."));
   if(data.next_id) setTimeout(() => location.href = `/photo/${data.next_id}`, 800);
 };
+
+// Enter in a field adds its raw value as a confirmed chip for that category.
+document.querySelectorAll('#interview input[type=text]').forEach(inp => {
+  inp.addEventListener("keydown", e => {
+    if(e.key === "Enter"){ e.preventDefault();
+      inp.value.split(",").forEach(v => { if(v.trim()) addConfirmed(v.trim(), []); });
+      inp.value = "";
+    }
+  });
+});
+
+// -- bulk-tag filmstrip selection --
+function updateSelCount(){
+  const n = selectedIds.size;
+  const c = document.getElementById("sel-count");
+  if(c) c.textContent = n + (n === 1 ? " photo selected" : " photos selected");
+  const btn = document.getElementById("commit-btn");
+  if(btn) btn.textContent = n > 1 ? `✓ Save to ${n} photos` : "✓ Save to TagStudio";
+}
+function renderStrip(){
+  document.querySelectorAll(".thumb").forEach(t => {
+    const id = parseInt(t.dataset.id);
+    const on = selectedIds.has(id);
+    t.classList.toggle("sel", on);
+    t.querySelector(".tick").textContent = on ? "✓" : "";
+    t.onclick = () => { if(selectedIds.has(id)) selectedIds.delete(id); else selectedIds.add(id); renderStrip(); };
+  });
+  updateSelCount();
+}
+const _selAll = document.getElementById("sel-all");
+if(_selAll) _selAll.onclick = () => { document.querySelectorAll(".thumb").forEach(t => selectedIds.add(parseInt(t.dataset.id))); renderStrip(); };
+const _selClear = document.getElementById("sel-clear");
+if(_selClear) _selClear.onclick = () => { selectedIds.clear(); selectedIds.add(CURRENT_ID); renderStrip(); };
+
+// On load: auto-fill the capture year, show GPS suggestions, init the filmstrip.
+if(YEAR){ addConfirmed(String(YEAR), []); }
+renderGeo();
+renderStrip();
 </script>
 </body>
 </html>

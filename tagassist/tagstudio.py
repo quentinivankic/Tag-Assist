@@ -205,8 +205,19 @@ class TagStudioLibrary:
     def entry_count(self) -> int:
         return int(self.conn.execute("SELECT COUNT(*) FROM entries").fetchone()[0])
 
+    def _entry_order(self) -> str:
+        """ORDER BY clause for a chronological feed (newest first, like Immich),
+        using whichever date columns this TagStudio version has; falls back to
+        filename. Nulls sort last."""
+        cols = self._columns("entries")
+        date_cols = [c for c in ("date_created", "date_added", "date_modified") if c in cols]
+        if not date_cols:
+            return "ORDER BY id"
+        coalesce = "COALESCE(" + ", ".join(date_cols) + ")"
+        return f"ORDER BY {coalesce} IS NULL, {coalesce} DESC, filename DESC, id DESC"
+
     def entries(self, limit: int | None = None, offset: int = 0) -> list[Entry]:
-        sql = "SELECT id, path, filename FROM entries ORDER BY id"
+        sql = f"SELECT id, path, filename FROM entries {self._entry_order()}"
         if limit is not None:
             sql += f" LIMIT {int(limit)} OFFSET {int(offset)}"
         out: list[Entry] = []
@@ -470,6 +481,84 @@ class TagStudioLibrary:
         """Direct children of a tag (names), via ``tag_parents``."""
         c = self.canonical_name(name)
         return self.tags_under_category(c) if c else []
+
+    def _children_ids(self, tag_id: int) -> list[tuple[int, str]]:
+        if "tag_parents" not in self._tables():
+            return []
+        rows = self.conn.execute(
+            """SELECT c.id AS id, c.name AS name
+               FROM tag_parents tp JOIN tags c ON c.id = tp.child_id
+               WHERE tp.parent_id = ?""",
+            (tag_id,),
+        ).fetchall()
+        return [(r["id"], r["name"]) for r in rows]
+
+    def descendants(self, name: str) -> list[str]:
+        """All descendant tag names below ``name`` (any depth). Cycle-guarded."""
+        root = self.find_tag(name)
+        if root is None:
+            return []
+        out: list[str] = []
+        seen: set[int] = {root}
+        stack = [root]
+        while stack:
+            for cid, cname in self._children_ids(stack.pop()):
+                if cid in seen:
+                    continue
+                seen.add(cid)
+                out.append(cname)
+                stack.append(cid)
+        return out
+
+    def leaf_descendants(self, name: str) -> list[str]:
+        """Descendants that are themselves leaves (no children) — i.e. the
+        specific 'bottom' places/things under a location like Arizona."""
+        root = self.find_tag(name)
+        if root is None:
+            return []
+        leaves: list[str] = []
+        seen: set[int] = {root}
+        stack = [root]
+        while stack:
+            for cid, cname in self._children_ids(stack.pop()):
+                if cid in seen:
+                    continue
+                seen.add(cid)
+                stack.append(cid)
+                if not self._children_ids(cid):
+                    leaves.append(cname)
+        return sorted(set(leaves), key=str.lower)
+
+    def tag_tree(self) -> list[dict]:
+        """The full hierarchy as nested {name, children} dicts, roots first.
+
+        Roots are tags with no parent. A multi-parent tag appears under each of
+        its parents. Cycle-guarded."""
+        id2name = {
+            r["id"]: r["name"]
+            for r in self.conn.execute("SELECT id, name FROM tags").fetchall()
+        }
+        children_map: dict[int, list[int]] = {}
+        has_parent: set[int] = set()
+        if "tag_parents" in self._tables():
+            for r in self.conn.execute(
+                "SELECT parent_id, child_id FROM tag_parents"
+            ).fetchall():
+                children_map.setdefault(r["parent_id"], []).append(r["child_id"])
+                has_parent.add(r["child_id"])
+
+        def build(tid: int, seen: frozenset[int]) -> dict:
+            name = id2name.get(tid, "?")
+            if tid in seen:
+                return {"name": name, "children": []}
+            seen = seen | {tid}
+            kids = sorted(
+                children_map.get(tid, []), key=lambda i: id2name.get(i, "").lower()
+            )
+            return {"name": name, "children": [build(k, seen) for k in kids]}
+
+        roots = [i for i in id2name if i not in has_parent]
+        return [build(r, frozenset()) for r in sorted(roots, key=lambda i: id2name[i].lower())]
 
     def is_ancestor(self, a: str, b: str) -> bool:
         ca = self.canonical_name(a)
