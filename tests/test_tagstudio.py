@@ -194,6 +194,63 @@ def test_delete_tag_regrafts_children(sample_lib):
         assert "Moms House" in lib.tags_for_entry(e.id)
 
 
+def test_merge_moves_photos_and_children(sample_lib):
+    with TagStudioLibrary(sample_lib) as lib:
+        e1, e2 = lib.entries(limit=2)
+        # Set up the canonical Phoenix under Arizona.
+        lib.learn("Phoenix", "Location > USA > Arizona")
+        lib.apply_entity(e1.id, "Phoenix", ["Location", "USA", "Arizona"])
+        good = lib.find_tag("Phoenix")
+        # Inject a duplicate Phoenix (skipping the case-insensitive reuse path
+        # via learn) — simulates the real-world bad state the user hit.
+        usa = lib.find_tag("USA")
+        bad = lib._insert_with_defaults("tags", {"name": "Phoenix"})
+        lib._link_parent(usa, bad)
+        lib._insert_with_defaults("tag_entries", {"tag_id": bad, "entry_id": e2.id})
+        old_spot = lib._insert_with_defaults("tags", {"name": "Old Spot"})
+        lib._link_parent(bad, old_spot)
+        lib.conn.commit()
+        assert bad != good
+        assert set(lib.duplicate_name_tags().keys()) == {"phoenix"}
+
+        lib.merge_tag(bad, good)
+        # Both photos now have the canonical Phoenix
+        assert "Phoenix" in lib.tags_for_entry(e1.id)
+        assert "Phoenix" in lib.tags_for_entry(e2.id)
+        # The bad tag is gone
+        assert lib.conn.execute(
+            "SELECT 1 FROM tags WHERE id = ?", (bad,)
+        ).fetchone() is None
+        # Its child re-parented under the survivor.
+        assert "Old Spot" in lib.children("Phoenix")
+        # Duplicates are gone.
+        assert lib.duplicate_name_tags() == {}
+
+
+def test_merge_into_descendant_rejected(sample_lib):
+    with TagStudioLibrary(sample_lib) as lib:
+        lib.learn("Moms House", "Location > USA > Arizona > Phoenix")
+        with pytest.raises(ValueError):
+            lib.merge_tag(lib.find_tag("Phoenix"), lib.find_tag("Moms House"))
+
+
+def test_merge_skips_duplicate_photo_associations(sample_lib):
+    with TagStudioLibrary(sample_lib) as lib:
+        e = lib.entries(limit=1)[0]
+        # A photo already tagged with both source and target — must not crash
+        # or end up with two associations to the same target.
+        lib.learn("a", "")
+        lib.learn("b", "")
+        lib.apply_entity(e.id, "a", [])
+        lib.apply_entity(e.id, "b", [])
+        lib.merge_tag(lib.find_tag("a"), lib.find_tag("b"))
+        rows = lib.conn.execute(
+            "SELECT COUNT(*) c FROM tag_entries WHERE entry_id = ? AND tag_id = ?",
+            (e.id, lib.find_tag("b")),
+        ).fetchone()
+        assert rows["c"] == 1
+
+
 def test_resolve_chain_heals_multi_parent(sample_lib):
     # A stray direct USA->Phoenix link (from an earlier bug) must not shorten
     # the chain; resolve_chain picks the deepest parent (Arizona).

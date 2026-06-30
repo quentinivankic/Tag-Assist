@@ -599,6 +599,94 @@ class TagStudioLibrary:
             self._link_parent(parent_id, tag_id)
         self.conn.commit()
 
+    def full_path_by_id(self, tag_id: int) -> list[str]:
+        """Full path to a specific tag *by id*, not by name — needed when more
+        than one tag shares a name (a real-world bad state we want to surface)."""
+        row = self.conn.execute(
+            "SELECT name FROM tags WHERE id = ?", (tag_id,)
+        ).fetchone()
+        if row is None:
+            return []
+        chain: list[str] = []
+        seen: set[int] = {tag_id}
+        cur = tag_id
+        while True:
+            parents = [(pid, pname) for pid, pname in self._parents(cur) if pid not in seen]
+            if not parents:
+                break
+            pid, pname = max(parents, key=lambda p: self._depth(p[0]))
+            seen.add(pid)
+            chain.append(pname)
+            cur = pid
+        chain.reverse()
+        return [*chain, row["name"]]
+
+    def all_tag_paths(self) -> list[tuple[int, str, list[str]]]:
+        """Every tag as (id, name, full_path), iterating by id so duplicate-name
+        tags appear distinctly."""
+        rows = self.conn.execute(
+            "SELECT id, name FROM tags ORDER BY name COLLATE NOCASE, id"
+        ).fetchall()
+        return [(r["id"], r["name"], self.full_path_by_id(r["id"])) for r in rows]
+
+    def duplicate_name_tags(self) -> dict[str, list[int]]:
+        """Map of lowercased name -> list of tag ids when more than one tag
+        shares a name (case-insensitive). Empty when the library is clean."""
+        out: dict[str, list[int]] = {}
+        for r in self.conn.execute("SELECT id, name FROM tags").fetchall():
+            out.setdefault(r["name"].lower(), []).append(r["id"])
+        return {k: v for k, v in out.items() if len(v) > 1}
+
+    def merge_tag(self, source_id: int, target_id: int) -> None:
+        """Merge ``source`` into ``target``: every photo tagged with source
+        becomes tagged with target instead, source's children become target's
+        children, source's aliases move to target, source's old name becomes an
+        alias of target, then source is deleted. Cycle-guarded; no-op if same.
+        """
+        if source_id == target_id:
+            return
+        if target_id in self._descendant_ids(source_id):
+            raise ValueError("Can't merge a tag into one of its own descendants")
+        src_name = self.conn.execute(
+            "SELECT name FROM tags WHERE id = ?", (source_id,)
+        ).fetchone()
+        if src_name is None or self.conn.execute(
+            "SELECT 1 FROM tags WHERE id = ?", (target_id,)
+        ).fetchone() is None:
+            raise ValueError("Unknown tag id")
+
+        # Photos: move source's associations to target, skipping duplicates.
+        for r in self.conn.execute(
+            "SELECT entry_id FROM tag_entries WHERE tag_id = ?", (source_id,)
+        ).fetchall():
+            dup = self.conn.execute(
+                "SELECT 1 FROM tag_entries WHERE tag_id = ? AND entry_id = ?",
+                (target_id, r["entry_id"]),
+            ).fetchone()
+            if dup is None:
+                self.conn.execute(
+                    "UPDATE tag_entries SET tag_id = ? WHERE tag_id = ? AND entry_id = ?",
+                    (target_id, source_id, r["entry_id"]),
+                )
+        self.conn.execute("DELETE FROM tag_entries WHERE tag_id = ?", (source_id,))
+
+        # Children: re-parent source's children under target.
+        for cid, _ in self._children_ids(source_id):
+            self._link_parent(target_id, cid)
+        self.conn.execute("DELETE FROM tag_parents WHERE parent_id = ? OR child_id = ?",
+                          (source_id, source_id))
+
+        # Aliases: move + record the old name as an alias of target.
+        if "tag_aliases" in self._tables():
+            self.conn.execute(
+                "UPDATE tag_aliases SET tag_id = ? WHERE tag_id = ?",
+                (target_id, source_id),
+            )
+            self.add_alias(target_id, src_name["name"])
+
+        self.conn.execute("DELETE FROM tags WHERE id = ?", (source_id,))
+        self.conn.commit()
+
     def delete_tag(self, tag_id: int) -> None:
         """Delete a tag: its children re-parent up to its parent (nothing is
         orphaned), photos lose the tag, and its aliases are removed."""

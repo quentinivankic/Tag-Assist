@@ -31,12 +31,22 @@
   .tag { display:inline-block; padding:3px 9px; border-radius:8px; background:#202634;
          border:1px solid var(--line); cursor:grab; user-select:none; }
   .tag.cat { color:var(--accent); font-weight:600; }
+  .tag.dup { border-color:var(--warn); background:#2a2520; }
+  .tag.dup::after { content:' ⚠'; color:var(--warn); }
   .tag.over { border-color:var(--accent2); background:#23303a; }
   .tag.dragging { opacity:.4; }
   .count { color:var(--muted); font-size:12px; }
-  .del { cursor:pointer; color:var(--muted); font-weight:700; padding:0 4px; visibility:hidden; }
-  .row:hover .del { visibility:visible; }
+  .del, .mrg { cursor:pointer; color:var(--muted); font-weight:700; padding:0 4px;
+               visibility:hidden; font-size:14px; }
+  .row:hover .del, .row:hover .mrg { visibility:visible; }
   .del:hover { color:#ff8a8a; }
+  .mrg:hover { color:var(--accent); }
+  .mergebar { display:inline-flex; gap:6px; margin-left:8px; align-items:center; }
+  .mergebar input { padding:3px 8px; border-radius:8px; border:1px solid var(--accent);
+                    background:#161922; color:var(--text); font-size:14px; width:180px; }
+  .mergebar button { padding:3px 10px; font-size:13px; border-radius:6px;
+                    border:1px solid var(--line); background:#262b35; color:var(--text); cursor:pointer; }
+  .mergebar button.go { background:var(--accent); border-color:var(--accent); color:#0a0f1a; font-weight:700; }
   .ren { padding:3px 8px; border-radius:8px; border:1px solid var(--accent);
          background:#161922; color:var(--text); font-size:15px; }
   .empty { color:var(--muted); }
@@ -52,16 +62,19 @@
   <a href="/">← back to tagging</a>
 </header>
 <main>
-  <div class="hint">Double-click to rename · drag a tag onto another to nest it · drag to the bar below to make it top-level · × to delete. Changes apply to every photo automatically.</div>
+  <div class="hint">Double-click to rename · drag onto another to nest it · drag to the bar below to pull to top-level · ↪ to merge into another tag · × to delete. Changes apply to every photo automatically.</div>
+  <datalist id="all-tags">{% for n in known_nodes %}<option value="{{ n }}"></option>{% endfor %}</datalist>
   <input id="filter" type="text" placeholder="filter tags… (type any name)" autocomplete="off">
   <div id="rootzone">⬆ drop a tag here to pull it out to the top level</div>
 
   {% macro node(n) %}
     <li data-name="{{ n.name|lower }}">
       <span class="row">
-        <span class="tag {{ 'cat' if n.children else 'leaf' }}" draggable="true"
-              data-id="{{ n.id }}" data-name="{{ n.name }}">{{ n.name }}</span>
+        <span class="tag {{ 'cat' if n.children else 'leaf' }} {{ 'dup' if n.id in dup_ids else '' }}"
+              draggable="true" data-id="{{ n.id }}" data-name="{{ n.name }}"
+              {% if n.id in dup_ids %}title="duplicate name — drag onto its twin to merge them"{% endif %}>{{ n.name }}</span>
         {% if n.children %}<span class="count">{{ n.children|length }}</span>{% endif %}
+        <span class="mrg" data-id="{{ n.id }}" data-name="{{ n.name }}" title="merge into another tag">↪</span>
         <span class="del" data-id="{{ n.id }}" data-name="{{ n.name }}" title="delete">×</span>
       </span>
       {% if n.children %}<ul>{% for c in n.children %}{{ node(c) }}{% endfor %}</ul>{% endif %}
@@ -89,11 +102,12 @@ async function post(url, obj){
   return r.json();
 }
 
-let draggedId = null;
+let draggedId = null, draggedName = null;
 
 document.querySelectorAll(".tag").forEach(tag => {
   tag.addEventListener("dragstart", e => {
     draggedId = tag.dataset.id;
+    draggedName = tag.dataset.name;
     tag.classList.add("dragging");
     e.dataTransfer.effectAllowed = "move";
   });
@@ -102,8 +116,15 @@ document.querySelectorAll(".tag").forEach(tag => {
   tag.addEventListener("dragleave", () => tag.classList.remove("over"));
   tag.addEventListener("drop", async e => {
     e.preventDefault(); tag.classList.remove("over");
-    const targetId = tag.dataset.id;
+    const targetId = tag.dataset.id, targetName = tag.dataset.name;
     if(!draggedId || draggedId === targetId) return;
+    // Same name on both ends -> these are duplicates. Offer merge instead of nest.
+    if(draggedName && targetName.toLowerCase() === draggedName.toLowerCase()){
+      if(!confirm(`"${draggedName}" and "${targetName}" have the same name — merge them?\n\nEverything tagged with the dragged one (and its children) moves onto "${targetName}". The dragged tag is then deleted.`)) return;
+      try { await post("/tag/merge", { source_id: draggedId, target_id: targetId }); location.reload(); }
+      catch(err){ msg(err.message, true); }
+      return;
+    }
     try {
       await post("/tag/reparent", { tag_id: draggedId, parent_id: targetId });
       msg("Moved."); location.reload();
@@ -130,6 +151,34 @@ document.querySelectorAll(".tag").forEach(tag => {
       else if(e.key === "Escape") finish(false);
     });
     input.addEventListener("blur", () => finish(true));
+  });
+});
+
+// merge: ↪ click -> inline target picker with autocomplete -> confirm
+document.querySelectorAll(".mrg").forEach(m => {
+  m.addEventListener("click", () => {
+    if(m.parentElement.querySelector(".mergebar")) return;  // already open
+    const bar = document.createElement("span");
+    bar.className = "mergebar";
+    bar.innerHTML = `merge "<b>${m.dataset.name}</b>" into:
+      <input type="text" list="all-tags" placeholder="existing tag name">
+      <button type="button" class="go">Merge</button>
+      <button type="button" class="cancel">cancel</button>`;
+    m.after(bar);
+    const input = bar.querySelector("input"); input.focus();
+    const go = async () => {
+      const target = input.value.trim();
+      if(!target || target.toLowerCase() === m.dataset.name.toLowerCase()){ msg("Pick a different tag", true); return; }
+      if(!confirm(`Move every photo tagged "${m.dataset.name}" onto "${target}", and any children with it? "${m.dataset.name}" will be deleted (its name becomes an alias of "${target}").`)) return;
+      try { await post("/tag/merge", { source_id: m.dataset.id, target_name: target }); location.reload(); }
+      catch(err){ msg(err.message, true); }
+    };
+    bar.querySelector(".go").onclick = go;
+    bar.querySelector(".cancel").onclick = () => bar.remove();
+    input.addEventListener("keydown", e => {
+      if(e.key === "Enter"){ e.preventDefault(); go(); }
+      else if(e.key === "Escape") bar.remove();
+    });
   });
 });
 

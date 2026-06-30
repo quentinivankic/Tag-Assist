@@ -222,8 +222,14 @@ def create_app(config: Config) -> FastAPI:
         with open_lib() as lib:
             tree = lib.tag_tree()
             count = len(lib.all_tag_names())
+            known_nodes = lib.known_names()
+            dup_ids = {i for ids in lib.duplicate_name_tags().values() for i in ids}
         return _TEMPLATES.TemplateResponse(
-            request, "tags.html", {"tree": tree, "count": count}
+            request, "tags.html",
+            {
+                "tree": tree, "count": count,
+                "known_nodes": known_nodes, "dup_ids": list(dup_ids),
+            },
         )
 
     @app.post("/tag/rename")
@@ -244,6 +250,31 @@ def create_app(config: Config) -> FastAPI:
             except ValueError as e:
                 raise HTTPException(400, str(e))
         return JSONResponse({"ok": True})
+
+    @app.post("/tag/merge")
+    def tag_merge(
+        source_id: int = Form(...),
+        target_id: str = Form(""),
+        target_name: str = Form(""),
+    ):
+        """Merge ``source_id`` into another tag. Prefer ``target_id`` (passed by
+        the drag-onto-twin case where the exact tag is known); fall back to
+        ``target_name`` for the type-it-in case (ambiguous if duplicates)."""
+        with open_lib() as lib:
+            if target_id.strip():
+                tid = int(target_id)
+            else:
+                tid = lib.find_tag(target_name)
+                if tid is None:
+                    raise HTTPException(400, f"No tag named '{target_name}'")
+            try:
+                lib.merge_tag(source_id, tid)
+            except ValueError as e:
+                raise HTTPException(400, str(e))
+            row = lib.conn.execute(
+                "SELECT name FROM tags WHERE id = ?", (tid,)
+            ).fetchone()
+        return JSONResponse({"target": row["name"] if row else None})
 
     @app.post("/tag/delete")
     def tag_delete(tag_id: int = Form(...)):
