@@ -16,6 +16,8 @@ source of truth, so the app and TagStudio can never drift out of sync.
 from __future__ import annotations
 
 import json
+import shutil
+import time
 from io import BytesIO
 from pathlib import Path
 
@@ -44,12 +46,48 @@ _WEB_SAFE = {".jpg", ".jpeg", ".png", ".gif", ".webp", ".bmp", ".svg"}
 _BOX_CATEGORY = {"people": "People", "location": "Location", "context": "Context"}
 
 
+def _backup_on_startup(library_root: str, *, keep: int = 10) -> None:
+    """Copy ts_library.sqlite to a timestamped .bak file before the app does
+    any writes. Keeps the most recent ``keep`` backups; older ones are pruned.
+
+    The backup is written next to the live DB inside ``.TagStudio``. Restore is
+    just: stop the app, copy the .bak you want back over ts_library.sqlite.
+    """
+    try:
+        from .tagstudio import find_library_db  # local import to avoid cycle
+        db = find_library_db(library_root)
+    except Exception:
+        return  # no library yet (fresh setup); nothing to back up
+    backups_dir = db.parent / "tagassist_backups"
+    backups_dir.mkdir(parents=True, exist_ok=True)
+    stamp = time.strftime("%Y%m%d-%H%M%S")
+    target = backups_dir / f"ts_library.{stamp}.sqlite.bak"
+    try:
+        shutil.copy2(db, target)
+        print(f"[Tag-Assist] backup -> {target}")
+    except Exception as exc:  # pragma: no cover - best effort
+        print(f"[Tag-Assist] backup FAILED ({exc}); proceeding without snapshot")
+        return
+    # Prune: keep most-recent ``keep`` .bak files.
+    backups = sorted(backups_dir.glob("ts_library.*.sqlite.bak"))
+    for old in backups[:-keep]:
+        try:
+            old.unlink()
+        except Exception:
+            pass
+
+
 def create_app(config: Config) -> FastAPI:
     app = FastAPI(title="Tag-Assist")
     faces = FaceEngine(config.library)
 
     def open_lib() -> TagStudioLibrary:
         return TagStudioLibrary(config.library).connect()
+
+    # Safety: snapshot ts_library.sqlite on startup. Tag-Assist never writes
+    # anywhere else, but a per-session backup is a cheap insurance policy when
+    # pointing at a real library. Keeps the most recent N backups.
+    _backup_on_startup(config.library, keep=10)
 
     # One-time: fold any legacy entities.json knowledge file into the DB, so
     # TagStudio's database becomes the sole source of truth from here on.
